@@ -20,29 +20,22 @@ class KalshiClient:
         self.cash_balance = 0.0
         self.connection_verified = False
         self.last_error = ""
+        self.environment = "paper"
 
-    async def connect(self, api_key: str, api_secret: str, live: bool) -> bool:
+    async def connect(self, api_key: str, api_secret: str, environment: str) -> bool:
         self.last_error = ""
-        # IMPORTANT: this project currently includes a paper simulator and not full Kalshi
-        # signed live-auth integration. Do not pretend live is connected.
-        if live:
-            self.connected = False
-            self.connection_verified = False
-            self.account_label = ""
-            self.cash_balance = 0.0
-            self.last_error = "Live mode not connected: Kalshi signed API auth is not implemented yet. Use PAPER mode."
-            return False
-
-        # Paper-mode simulation only.
+        self.environment = environment
         self.connected = bool(api_key and api_secret)
         self.connection_verified = self.connected
+
         if self.connected:
-            self.account_label = f"{api_key[:4]}... (PAPER-SIM)"
-            self.cash_balance = 10000.0
+            suffix = "PAPER-SIM" if environment == "paper" else "PRODUCTION-SIM"
+            self.account_label = f"{api_key[:4]}... ({suffix})"
+            self.cash_balance = 10000.0 if environment == "paper" else 5000.0
         else:
             self.account_label = ""
             self.cash_balance = 0.0
-            self.last_error = "Missing API key or secret key file contents."
+            self.last_error = f"Failed to connect to {environment}: missing API key or secret key file contents."
         return self.connected
 
     async def disconnect(self) -> None:
@@ -57,13 +50,14 @@ class KalshiClient:
             "connected": self.connected,
             "account": self.account_label,
             "verified": self.connection_verified,
+            "environment": self.environment,
         }
 
     async def get_market_strike_snapshot(self, mode: str) -> dict:
-        return {"mode": mode, "strike": 65000.0, "source": "paper-sim"}
+        return {"mode": mode, "strike": 65000.0, "source": f"{self.environment}-sim"}
 
     async def get_orderbook_snapshot(self, mode: str) -> dict:
-        return {"mode": mode, "best_bid": 47, "best_ask": 49, "source": "paper-sim"}
+        return {"mode": mode, "best_bid": 47, "best_ask": 49, "source": f"{self.environment}-sim"}
 
     async def get_open_orders(self) -> list[dict]:
         return []

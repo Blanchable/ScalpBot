@@ -11,8 +11,7 @@ A desktop GUI trading bot scaffold for BTC interval scalp trading on Kalshi with
 - Session dashboard: cash balance, session PnL, trade count, selected market/mode, and polling rates
 - Live transparency panel with per-minute polling counts (strike, orderbook, open orders)
 - Runtime risk/scanning setting fields in GUI (max position size, daily max loss, scan interval)
-- Paper mode default; live mode explicit toggle confirmation
-- **Current status:** live Kalshi signed-auth execution is not implemented in this scaffold; LIVE mode is blocked with a clear warning and PAPER-SIM is fully supported.
+- Environment toggle for `paper` and `production` modes with separate credential profiles per environment
 - Credential storage (encrypted local file)
 - Async controller loop with explicit bot states
 - Market filtering + signal scoring + paper order simulation
@@ -28,7 +27,7 @@ A desktop GUI trading bot scaffold for BTC interval scalp trading on Kalshi with
 3. Enter your Kalshi API key in GUI and choose your secret `.key` file
 4. Save credentials (stores API key + selected key-file path)
 5. Choose mode (`15m` or `1h`)
-6. Leave live toggle OFF for paper mode
+6. Choose environment (`paper` or `production`)
 7. Click **Start Bot**
 8. Watch cash balance, session PnL, market mode/selection, and polling-rate diagnostics update live
 

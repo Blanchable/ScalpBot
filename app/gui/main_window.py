@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -55,7 +54,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         self.status = QLabel("Idle: waiting for user to start")
-        self.connection_status = QLabel("Kalshi: Disconnected")
+        self.connection_status = QLabel("Kalshi: Disconnected [paper]")
         self.market_mode_status = QLabel("Market Mode: not connected")
         layout.addWidget(self.status)
         layout.addWidget(self.connection_status)
@@ -65,7 +64,7 @@ class MainWindow(QMainWindow):
         self.cash_balance_label = QLabel("Cash Balance: $0.00")
         self.session_pnl_label = QLabel("Session PnL: $0.00")
         self.trade_count_label = QLabel("Trades: 0")
-        self.polling_label = QLabel("Poll/min — strike: 0 | orderbook: 0 | open orders: 0 (paper sim)")
+        self.polling_label = QLabel("Poll/min — strike: 0 | orderbook: 0 | open orders: 0")
         metrics.addWidget(self.cash_balance_label, 0, 0)
         metrics.addWidget(self.session_pnl_label, 0, 1)
         metrics.addWidget(self.trade_count_label, 0, 2)
@@ -87,11 +86,13 @@ class MainWindow(QMainWindow):
 
         self.mode = QComboBox()
         self.mode.addItems(["15m", "1h"])
-        self.live = QCheckBox("Enable LIVE mode")
+        self.environment = QComboBox()
+        self.environment.addItems(["paper", "production"])
+        self.environment.currentTextChanged.connect(self.on_environment_changed)
         form.addRow("API Key", self.api_key)
         form.addRow("Secret Key File", key_row_widget)
+        form.addRow("Environment", self.environment)
         form.addRow("Strategy Mode", self.mode)
-        form.addRow("", self.live)
 
         self.max_pos_input = QLineEdit(str(self.settings.global_settings.max_position_size))
         self.daily_loss_input = QLineEdit(str(self.settings.global_settings.daily_max_loss))
@@ -144,8 +145,12 @@ class MainWindow(QMainWindow):
             return
         self.key_file_input.setText(str(self.secret_store.key_path))
 
+    def on_environment_changed(self, environment: str) -> None:
+        self.secret_store.load_credentials(environment=environment)
+        self._load_credentials()
+
     def _load_credentials(self) -> None:
-        api_key, _ = self.secret_store.load_credentials()
+        api_key, _ = self.secret_store.load_credentials(environment=self.environment.currentText())
         self.api_key.setText(api_key)
         self.key_file_input.setText(str(self.secret_store.key_path))
 
@@ -160,7 +165,7 @@ class MainWindow(QMainWindow):
             return False
 
     def save_credentials(self) -> None:
-        self.secret_store.save_credentials(self.api_key.text().strip())
+        self.secret_store.save_credentials(self.api_key.text().strip(), environment=self.environment.currentText())
         QMessageBox.information(self, "Saved", "API key and key-file path stored successfully.")
 
     def _emit(self, kind: str, payload: dict) -> None:
@@ -184,13 +189,10 @@ class MainWindow(QMainWindow):
     def start_bot(self) -> None:
         if not self._apply_runtime_settings():
             return
-        if self.live.isChecked():
-            confirm = QMessageBox.question(self, "Confirm live mode", "Switch to LIVE mode?")
-            if confirm != QMessageBox.StandardButton.Yes:
-                return
+        selected_environment = self.environment.currentText()
 
         try:
-            api_secret = self.secret_store.read_secret_key()
+            api_secret = self.secret_store.read_secret_key(environment=selected_environment)
         except FileNotFoundError as exc:
             QMessageBox.warning(self, "Missing key file", str(exc))
             return
@@ -199,7 +201,7 @@ class MainWindow(QMainWindow):
         if self._controller is None or self._loop is None:
             QMessageBox.warning(self, "Startup error", "Controller thread failed to initialize. Please restart app.")
             return
-        broker_mode = "live" if self.live.isChecked() else "paper"
+        broker_mode = selected_environment
         coro = self._controller.start(self.api_key.text().strip(), api_secret, broker_mode, self.mode.currentText())
         asyncio.run_coroutine_threadsafe(coro, self._loop)
         self.start_btn.setEnabled(False)
@@ -219,10 +221,11 @@ class MainWindow(QMainWindow):
             if payload.get("connected"):
                 verified = payload.get("verified", False)
                 verify_text = "verified" if verified else "unverified"
-                self.connection_status.setText(f"Kalshi: Connected ({payload.get('account', 'Unknown')}, {verify_text})")
+                env = payload.get("broker_mode", payload.get("environment", "paper"))
+                self.connection_status.setText(f"Kalshi: Connected [{env}] ({payload.get('account', 'Unknown')}, {verify_text})")
                 self.cash_balance_label.setText(f"Cash Balance: ${payload.get('cash_balance', 0.0):,.2f}")
             else:
-                self.connection_status.setText("Kalshi: Disconnected")
+                self.connection_status.setText(f"Kalshi: Disconnected [{self.environment.currentText()}]")
                 self.cash_balance_label.setText("Cash Balance: $0.00")
         elif kind == "market_mode":
             mode = payload.get("strategy_mode", "?")

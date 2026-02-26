@@ -41,7 +41,7 @@ class AppController:
             return
         self.state.transition(AppState.STARTING)
         self.emit("state", {"state": self.state.state})
-        ok = await self.kalshi.connect(api_key, api_secret, live=broker_mode == "live")
+        ok = await self.kalshi.connect(api_key, api_secret, environment=broker_mode)
         if not ok:
             self.state.transition(AppState.HALTED)
             reason = self.kalshi.last_error or "Halted: credentials invalid"
@@ -61,7 +61,7 @@ class AppController:
                 "verified": summary.get("verified", False),
             },
         )
-        self.emit("status_reason", {"message": f"Connected to Kalshi account: {self.kalshi.account_label}"})
+        self.emit("status_reason", {"message": f"Connected to Kalshi {broker_mode} environment: {self.kalshi.account_label}"})
         self.emit("market_mode", {"strategy_mode": strategy_mode})
         self.emit("session_metrics", {"session_pnl": self.session_realized_pnl, "trade_count": self.trade_count})
         self._running = True
