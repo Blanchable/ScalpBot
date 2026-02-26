@@ -36,8 +36,8 @@ def test_controller_emits_session_and_polling_metrics(monkeypatch):
     async def fake_tick():
         return FeedTick(spot=65000, momentum_5s=5, momentum_15s=4, momentum_60s=6, volatility=1, updated_at=1, is_stale=False)
 
-    async def fake_markets(mode: str):
-        return [Market(ticker="KXBTCD-15m-ATM", yes_bid=47, yes_ask=49, no_bid=51, no_ask=53, midpoint=48, seconds_to_expiry=400)]
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="KXBTCD-15m-ATM", yes_bid=47, yes_ask=49, no_bid=51, no_ask=53, midpoint=48, seconds_to_expiry=400)
 
     async def fake_orderbook(ticker: str):
         return {"best_yes_bid": 47, "best_yes_ask": 49, "best_no_bid": 51, "best_no_ask": 53}
@@ -51,7 +51,7 @@ def test_controller_emits_session_and_polling_metrics(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "list_btc_markets", fake_markets)
+    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
     monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
@@ -94,8 +94,8 @@ def test_controller_skips_new_entry_when_open_orders_exist(monkeypatch):
     async def fake_tick():
         return FeedTick(spot=65000, momentum_5s=6, momentum_15s=5, momentum_60s=6, volatility=1, updated_at=1, is_stale=False)
 
-    async def fake_markets(mode: str):
-        return [Market(ticker="T", yes_bid=47, yes_ask=49, no_bid=51, no_ask=53, midpoint=48, seconds_to_expiry=400)]
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=47, yes_ask=49, no_bid=51, no_ask=53, midpoint=48, seconds_to_expiry=400)
 
     async def fake_orderbook(ticker: str):
         return {"best_yes_bid": 47, "best_yes_ask": 49, "best_no_bid": 51, "best_no_ask": 53}
@@ -112,7 +112,7 @@ def test_controller_skips_new_entry_when_open_orders_exist(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "list_btc_markets", fake_markets)
+    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
     monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
@@ -150,8 +150,8 @@ def test_controller_uses_no_ask_limit_for_buy_no(monkeypatch):
     async def fake_tick():
         return FeedTick(spot=65000, momentum_5s=-6, momentum_15s=-5, momentum_60s=-7, volatility=1, updated_at=1, is_stale=False)
 
-    async def fake_markets(mode: str):
-        return [Market(ticker="T", yes_bid=52, yes_ask=53, no_bid=47, no_ask=48, midpoint=52, seconds_to_expiry=400)]
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=52, yes_ask=53, no_bid=47, no_ask=48, midpoint=52, seconds_to_expiry=400)
 
     async def fake_orderbook(ticker: str):
         return {"best_yes_bid": 52, "best_yes_ask": 53, "best_no_bid": 47, "best_no_ask": 48}
@@ -169,7 +169,7 @@ def test_controller_uses_no_ask_limit_for_buy_no(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "list_btc_markets", fake_markets)
+    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
     monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
@@ -250,9 +250,9 @@ def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypat
     async def fake_tick():
         return FeedTick(spot=65000, momentum_5s=1, momentum_15s=1, momentum_60s=1, volatility=1, updated_at=1, is_stale=False)
 
-    async def fake_markets(mode: str):
+    async def fake_resolve(mode: str, now=None):
         # Expires too soon, so it will be filtered out by rank_markets.
-        return [Market(ticker="BTC-PREVIEW", yes_bid=49, yes_ask=51, no_bid=49, no_ask=51, midpoint=50, seconds_to_expiry=1)]
+        return Market(ticker="BTC-PREVIEW", yes_bid=49, yes_ask=51, no_bid=49, no_ask=51, midpoint=50, seconds_to_expiry=1)
 
     async def fake_open_orders():
         return []
@@ -260,7 +260,7 @@ def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypat
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "list_btc_markets", fake_markets)
+    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
 
     async def run():
@@ -270,10 +270,21 @@ def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypat
 
     asyncio.run(run())
 
-    market_events = [payload for kind, payload in events if kind == "market"]
-    assert market_events
-    assert market_events[0]["ticker"] == "BTC-PREVIEW"
-    assert market_events[0]["bid"] == 49
-    assert market_events[0]["ask"] == 51
     reasons = [payload for kind, payload in events if kind == "status_reason"]
-    assert any("preview" in r["message"].lower() for r in reasons)
+    assert any("skipping resolved market" in r["message"].lower() for r in reasons)
+
+
+
+def test_controller_mode_change_invalidates_cached_market():
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    controller = AppController(settings, emit)
+    controller._resolved_market = Market(ticker="OLD", yes_bid=49, yes_ask=50, no_bid=50, no_ask=51, midpoint=49.5, seconds_to_expiry=120)
+
+    controller.invalidate_market_cache("mode changed to 1h")
+
+    assert controller._resolved_market is None

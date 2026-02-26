@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import base64
-import re
+import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
@@ -13,18 +13,20 @@ except ModuleNotFoundError:  # pragma: no cover
     httpx = None
 
 try:
-    from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
 except ModuleNotFoundError:  # pragma: no cover
-    InvalidSignature = Exception
     hashes = None
     serialization = None
     padding = None
 
+logger = logging.getLogger("APP.KALSHI")
 
-FIFTEEN_MIN_RE = re.compile(r"\b(15\s*-?\s*(M|MIN|MINS|MINUTE|MINUTES))\b", re.IGNORECASE)
-ONE_HOUR_RE = re.compile(r"\b((1|60)\s*-?\s*(H|HR|HRS|M|MIN|MINS|HOUR|HOURS)|HOURLY)\b", re.IGNORECASE)
+BTC_15M_SERIES_TICKER = "KXBTC15M"
+# TODO: confirm the exact live 1h BTC series ticker in your Kalshi account and update here if needed.
+BTC_1H_SERIES_TICKER = "KXBTC1H"
+CLOSE_WINDOW_15M_SECONDS = 120
+CLOSE_WINDOW_1H_SECONDS = 300
 
 
 @dataclass
@@ -38,6 +40,8 @@ class Market:
     seconds_to_expiry: int
     active: bool = True
     title: str = ""
+    close_time: datetime | None = None
+    series_ticker: str = ""
 
     @property
     def bid(self) -> int:
@@ -127,18 +131,14 @@ class KalshiClient:
         headers = self._auth_headers(method, path) if auth else {}
         return await self._http.request(method, path, params=params, json=json, headers=headers)
 
-    def _market_text(self, item: dict) -> str:
-        ticker = str(item.get("ticker", ""))
-        title = str(item.get("title", ""))
-        return f"{ticker} {title}".upper()
-
     def _extract_close_dt(self, item: dict) -> datetime | None:
         for field in (
             "close_time",
+            "close_date",
+            "close_datetime",
             "expiration_time",
             "expiration_datetime",
             "end_date",
-            "close_date",
             "market_close_time",
             "settlement_time",
         ):
@@ -146,36 +146,120 @@ class KalshiClient:
             if not value:
                 continue
             try:
-                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                close_dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             except ValueError:
                 continue
+            return close_dt.astimezone(timezone.utc)
         return None
 
-    def _classify_btc_interval(self, item: dict) -> str | None:
-        text = self._market_text(item)
-        has_btc = "BTC" in text
-        if not has_btc:
+    def _series_for_mode(self, mode: str) -> str:
+        if mode == "15m":
+            return BTC_15M_SERIES_TICKER
+        if mode == "1h":
+            return BTC_1H_SERIES_TICKER
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    def _close_window_seconds(self, mode: str) -> int:
+        return CLOSE_WINDOW_15M_SECONDS if mode == "15m" else CLOSE_WINDOW_1H_SECONDS
+
+    def _compute_target_close(self, mode: str, now: datetime) -> datetime:
+        current = now.astimezone(timezone.utc)
+        if mode == "15m":
+            minute_bucket = ((current.minute // 15) + 1) * 15
+            if minute_bucket == 60:
+                return current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            return current.replace(minute=minute_bucket, second=0, microsecond=0)
+        if mode == "1h":
+            return current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    def _parse_quote(self, item: dict) -> tuple[int, int, int, int] | None:
+        yes_bid_raw = item.get("yes_bid")
+        yes_ask_raw = item.get("yes_ask")
+        no_bid_raw = item.get("no_bid")
+        no_ask_raw = item.get("no_ask")
+
+        yes_bid = int(yes_bid_raw) if yes_bid_raw is not None else None
+        yes_ask = int(yes_ask_raw) if yes_ask_raw is not None else None
+        no_bid = int(no_bid_raw) if no_bid_raw is not None else None
+        no_ask = int(no_ask_raw) if no_ask_raw is not None else None
+
+        if yes_bid is None and no_ask is not None:
+            yes_bid = 100 - no_ask
+        if yes_ask is None and no_bid is not None:
+            yes_ask = 100 - no_bid
+        if no_bid is None and yes_ask is not None:
+            no_bid = 100 - yes_ask
+        if no_ask is None and yes_bid is not None:
+            no_ask = 100 - yes_bid
+
+        if yes_bid is None or yes_ask is None or no_bid is None or no_ask is None:
             return None
-
-        has_15 = bool(FIFTEEN_MIN_RE.search(text))
-        has_1h = bool(ONE_HOUR_RE.search(text))
-
-        if has_15 and not has_1h:
-            return "15m"
-        if has_1h and not has_15:
-            return "1h"
-        if has_15 and has_1h:
+        spread = yes_ask - yes_bid
+        if yes_ask < yes_bid or spread < 0 or spread > 99:
             return None
+        return yes_bid, yes_ask, no_bid, no_ask
 
+    def _market_from_item(self, item: dict, now: datetime) -> Market | None:
+        quote = self._parse_quote(item)
+        if quote is None:
+            return None
         close_dt = self._extract_close_dt(item)
         if close_dt is None:
             return None
-        minute = close_dt.astimezone(timezone.utc).minute
-        if minute == 0:
-            return "1h"
-        if minute in {15, 30, 45}:
-            return "15m"
-        return None
+        yes_bid, yes_ask, no_bid, no_ask = quote
+        midpoint = (yes_bid + yes_ask) / 2
+        return Market(
+            ticker=str(item.get("ticker", "")),
+            title=str(item.get("title", "")),
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            no_bid=no_bid,
+            no_ask=no_ask,
+            midpoint=midpoint,
+            seconds_to_expiry=max(0, int((close_dt - now).total_seconds())),
+            active=bool(item.get("open", True)),
+            close_time=close_dt,
+            series_ticker=str(item.get("series_ticker", "")),
+        )
+
+    async def resolve_active_btc_market(self, mode: str, now: datetime | None = None) -> Market | None:
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        target_close = self._compute_target_close(mode, now_utc)
+        series = self._series_for_mode(mode)
+        window = self._close_window_seconds(mode)
+        params = {
+            "status": "open",
+            "series_ticker": series,
+            "min_close_ts": int((target_close - timedelta(seconds=window)).timestamp()),
+            "max_close_ts": int((target_close + timedelta(seconds=window)).timestamp()),
+            "limit": 20,
+        }
+        logger.info("Resolving %s BTC market in series %s for target close %s", mode, series, target_close.isoformat())
+
+        response = await self._request("GET", f"{self.REST_PREFIX}/markets", params=params, auth=False)
+        response.raise_for_status()
+        items = response.json().get("markets", [])
+        candidates: list[tuple[float, Market]] = []
+        for item in items:
+            if str(item.get("series_ticker", "")) != series:
+                continue
+            market = self._market_from_item(item, now_utc)
+            if market is None or not market.active:
+                continue
+            if market.close_time is None:
+                continue
+            distance = abs((market.close_time - target_close).total_seconds())
+            candidates.append((distance, market))
+
+        if not candidates:
+            logger.info("No active BTC %s market found near target close %s", mode, target_close.isoformat())
+            return None
+
+        candidates.sort(key=lambda x: x[0])
+        resolved = candidates[0][1]
+        logger.info("Resolved market %s closing at %s", resolved.ticker, resolved.close_time.isoformat() if resolved.close_time else "unknown")
+        return resolved
 
     async def connect(self, api_key: str, api_secret: str, environment: str) -> bool:
         self.last_error = ""
@@ -281,39 +365,8 @@ class KalshiClient:
         }
 
     async def list_btc_markets(self, mode: str) -> list[Market]:
-        response = await self._request("GET", f"{self.REST_PREFIX}/markets", params={"status": "open"}, auth=False)
-        response.raise_for_status()
-        markets = response.json().get("markets", [])
-        now = datetime.now(timezone.utc)
-        selected: list[Market] = []
-
-        for item in markets:
-            if self._classify_btc_interval(item) != mode:
-                continue
-
-            yes_bid = int(item.get("yes_bid", 0) or 0)
-            no_bid = int(item.get("no_bid", 0) or 0)
-            yes_ask = 100 - no_bid if no_bid else 100
-            no_ask = 100 - yes_bid if yes_bid else 100
-            midpoint = (yes_bid + yes_ask) / 2
-
-            close_dt = self._extract_close_dt(item)
-            seconds_to_expiry = 0
-            if close_dt is not None:
-                seconds_to_expiry = max(0, int((close_dt - now).total_seconds()))
-
-            selected.append(
-                Market(
-                    ticker=str(item.get("ticker", "")),
-                    title=str(item.get("title", "")),
-                    yes_bid=yes_bid,
-                    yes_ask=yes_ask,
-                    no_bid=no_bid,
-                    no_ask=no_ask,
-                    midpoint=midpoint,
-                    seconds_to_expiry=seconds_to_expiry,
-                    active=bool(item.get("open", True)),
-                )
-            )
-
-        return selected
+        resolved = await self.resolve_active_btc_market(mode)
+        if resolved is None:
+            logger.info("No active BTC %s market resolved", mode)
+            return []
+        return [resolved]

@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         self.environment = QComboBox()
         self.environment.addItems(["paper", "production"])
         self.environment.currentTextChanged.connect(self.on_environment_changed)
+        self.mode.currentTextChanged.connect(self.on_mode_changed)
         form.addRow("API Key", self.api_key)
         form.addRow("Secret Key File", key_row_widget)
         form.addRow("Environment", self.environment)
@@ -145,6 +146,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid key file", str(exc))
             return
         self.key_file_input.setText(str(self.secret_store.key_path))
+
+
+    def on_mode_changed(self, mode: str) -> None:
+        if self._controller is not None:
+            self._controller.invalidate_market_cache(f"mode changed to {mode}")
 
     def on_environment_changed(self, environment: str) -> None:
         self.secret_store.load_credentials(environment=environment)
