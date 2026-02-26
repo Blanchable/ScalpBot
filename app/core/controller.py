@@ -103,6 +103,23 @@ class AppController:
     def _is_http_error(self, exc: Exception) -> bool:
         return httpx is not None and isinstance(exc, httpx.HTTPError)
 
+    def _emit_market_preview(self, market, strategy_mode: str, message: str) -> None:
+        self.emit(
+            "market",
+            {
+                "ticker": market.ticker,
+                "bid": market.yes_bid,
+                "ask": market.yes_ask,
+                "score": 0,
+                "strategy_mode": strategy_mode,
+                "open_orders": 0,
+                "edge": 0.0,
+                "side": "none",
+            },
+        )
+        self.emit("market_mode", {"strategy_mode": strategy_mode, "selected_market": market.ticker})
+        self.emit("status_reason", {"message": message})
+
     async def _loop(self, strategy_mode: str, broker_mode: str) -> None:
         self.state.transition(AppState.SCANNING)
         self.emit("state", {"state": self.state.state})
@@ -143,7 +160,19 @@ class AppController:
                 mode_cfg.preferred_mid_high,
             )
             if not ranked:
-                self.emit("status_reason", {"message": "Scanning: no BTC candidates passed filters"})
+                if markets:
+                    preview = min(markets, key=lambda m: abs(50 - m.midpoint))
+                    self._emit_market_preview(
+                        preview,
+                        strategy_mode,
+                        (
+                            f"Scanning: no candidates passed filters. "
+                            f"Preview {preview.ticker} YES {preview.yes_bid}/{preview.yes_ask} "
+                            f"NO {preview.no_bid}/{preview.no_ask}"
+                        ),
+                    )
+                else:
+                    self.emit("status_reason", {"message": "Scanning: no BTC candidates passed filters"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 

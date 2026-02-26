@@ -227,3 +227,53 @@ def test_controller_skips_trade_on_stale_feed(monkeypatch):
     assert called["order"] == 0
     reasons = [payload for kind, payload in events if kind == "status_reason"]
     assert any("stale" in r["message"].lower() for r in reasons)
+
+
+def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypatch):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    controller = AppController(settings, emit)
+
+    async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary() -> dict:
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=1, momentum_15s=1, momentum_60s=1, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_markets(mode: str):
+        # Expires too soon, so it will be filtered out by rank_markets.
+        return [Market(ticker="BTC-PREVIEW", yes_bid=49, yes_ask=51, no_bid=49, no_ask=51, midpoint=50, seconds_to_expiry=1)]
+
+    async def fake_open_orders():
+        return []
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "list_btc_markets", fake_markets)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "15m")
+        await asyncio.sleep(0.4)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    market_events = [payload for kind, payload in events if kind == "market"]
+    assert market_events
+    assert market_events[0]["ticker"] == "BTC-PREVIEW"
+    assert market_events[0]["bid"] == 49
+    assert market_events[0]["ask"] == 51
+    reasons = [payload for kind, payload in events if kind == "status_reason"]
+    assert any("preview" in r["message"].lower() for r in reasons)

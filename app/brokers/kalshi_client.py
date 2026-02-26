@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 FIFTEEN_MIN_RE = re.compile(r"\b(15\s*-?\s*(M|MIN|MINS|MINUTE|MINUTES))\b", re.IGNORECASE)
-ONE_HOUR_RE = re.compile(r"\b(1\s*-?\s*(H|HR|HRS|HOUR|HOURS)|HOURLY)\b", re.IGNORECASE)
+ONE_HOUR_RE = re.compile(r"\b((1|60)\s*-?\s*(H|HR|HRS|M|MIN|MINS|HOUR|HOURS)|HOURLY)\b", re.IGNORECASE)
 
 
 @dataclass
@@ -133,7 +133,15 @@ class KalshiClient:
         return f"{ticker} {title}".upper()
 
     def _extract_close_dt(self, item: dict) -> datetime | None:
-        for field in ("close_time", "expiration_time", "expiration_datetime", "end_date"):
+        for field in (
+            "close_time",
+            "expiration_time",
+            "expiration_datetime",
+            "end_date",
+            "close_date",
+            "market_close_time",
+            "settlement_time",
+        ):
             value = item.get(field)
             if not value:
                 continue
