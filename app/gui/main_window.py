@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.start_btn = QPushButton("Start Bot")
         self.stop_btn = QPushButton("Stop Bot")
         self.stop_btn.setEnabled(False)
+        self.start_btn.setEnabled(True)
         self.save_btn.clicked.connect(self.save_credentials)
         self.start_btn.clicked.connect(self.start_bot)
         self.stop_btn.clicked.connect(self.stop_bot)
@@ -204,8 +205,6 @@ class MainWindow(QMainWindow):
         broker_mode = selected_environment
         coro = self._controller.start(self.api_key.text().strip(), api_secret, broker_mode, self.mode.currentText())
         asyncio.run_coroutine_threadsafe(coro, self._loop)
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
 
     def stop_bot(self) -> None:
         if self._controller and self._loop:
@@ -224,9 +223,13 @@ class MainWindow(QMainWindow):
                 env = payload.get("broker_mode", payload.get("environment", "paper"))
                 self.connection_status.setText(f"Kalshi: Connected [{env}] ({payload.get('account', 'Unknown')}, {verify_text})")
                 self.cash_balance_label.setText(f"Cash Balance: ${payload.get('cash_balance', 0.0):,.2f}")
+                self.start_btn.setEnabled(False)
+                self.stop_btn.setEnabled(True)
             else:
                 self.connection_status.setText(f"Kalshi: Disconnected [{self.environment.currentText()}]")
                 self.cash_balance_label.setText("Cash Balance: $0.00")
+                self.start_btn.setEnabled(True)
+                self.stop_btn.setEnabled(False)
         elif kind == "market_mode":
             mode = payload.get("strategy_mode", "?")
             chosen = payload.get("selected_market", "awaiting selection")
