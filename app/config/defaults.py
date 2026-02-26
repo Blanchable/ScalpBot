@@ -15,6 +15,7 @@ DEFAULT_GLOBAL_SETTINGS = {
     "max_position_size": 1,
     "max_notional_exposure": 100.0,
     "feed_stale_seconds": 5,
+    "scan_interval_seconds": 1.0,
 }
 
 DEFAULT_MODE_SETTINGS = {

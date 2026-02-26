@@ -8,6 +8,9 @@ A desktop GUI trading bot scaffold for BTC interval scalp trading on Kalshi with
 - PySide6 desktop control center
 - Strategy mode switch (15m / 1h)
 - Kalshi connection status indicator with connected account label
+- Session dashboard: cash balance, session PnL, trade count, selected market/mode, and polling rates
+- Live transparency panel with per-minute polling counts (strike, orderbook, open orders)
+- Runtime risk/scanning setting fields in GUI (max position size, daily max loss, scan interval)
 - Paper mode default; live mode explicit toggle confirmation
 - Credential storage (encrypted local file)
 - Async controller loop with explicit bot states
@@ -26,6 +29,7 @@ A desktop GUI trading bot scaffold for BTC interval scalp trading on Kalshi with
 5. Choose mode (`15m` or `1h`)
 6. Leave live toggle OFF for paper mode
 7. Click **Start Bot**
+8. Watch cash balance, session PnL, market mode/selection, and polling-rate diagnostics update live
 
 ## Manual run (dev)
 

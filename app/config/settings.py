@@ -39,6 +39,7 @@ class GlobalSettings:
     max_position_size: int = 1
     max_notional_exposure: float = 100.0
     feed_stale_seconds: int = 5
+    scan_interval_seconds: float = 1.0
 
 
 @dataclass
