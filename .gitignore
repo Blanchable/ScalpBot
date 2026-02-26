@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtualenv
+.venv/
+
+# Local runtime artifacts
+data/db/*.sqlite3
+data/logs/*.log
+data/logs/write_test.log
+
+# OS/editor
+.DS_Store
+Thumbs.db

@@ -1,0 +1,50 @@
+{
+  "global_settings": {
+    "broker_mode": "paper",
+    "strategy_mode": "15m",
+    "max_simultaneous_positions": 1,
+    "max_entry_reprice_attempts": 1,
+    "entry_order_timeout_ms": 1500,
+    "max_entry_slippage_cents": 1,
+    "allow_marketable_limit_on_stop": true,
+    "allow_mean_reversion": false,
+    "daily_max_loss": 50.0,
+    "session_max_loss": 25.0,
+    "max_consecutive_losses": 3,
+    "max_position_size": 1,
+    "max_notional_exposure": 100.0,
+    "feed_stale_seconds": 5
+  },
+  "mode_settings": {
+    "15m": {
+      "spread_filter_cents": 2,
+      "min_price_cents": 15,
+      "max_price_cents": 85,
+      "preferred_mid_low": 25,
+      "preferred_mid_high": 75,
+      "min_edge_after_friction_cents": 2,
+      "profit_target_cents": 3,
+      "stop_loss_cents": 2,
+      "time_stop_seconds": 90,
+      "no_entry_before_expiry_seconds": 90,
+      "flatten_before_expiry_seconds": 45,
+      "cooldown_after_loss_seconds": 60,
+      "min_signal_score": 65
+    },
+    "1h": {
+      "spread_filter_cents": 2,
+      "min_price_cents": 15,
+      "max_price_cents": 85,
+      "preferred_mid_low": 20,
+      "preferred_mid_high": 80,
+      "min_edge_after_friction_cents": 2,
+      "profit_target_cents": 4,
+      "stop_loss_cents": 3,
+      "time_stop_seconds": 240,
+      "no_entry_before_expiry_seconds": 300,
+      "flatten_before_expiry_seconds": 120,
+      "cooldown_after_loss_seconds": 90,
+      "min_signal_score": 65
+    }
+  }
+}
