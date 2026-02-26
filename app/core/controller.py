@@ -44,8 +44,9 @@ class AppController:
         ok = await self.kalshi.connect(api_key, api_secret, live=broker_mode == "live")
         if not ok:
             self.state.transition(AppState.HALTED)
-            self.emit("status_reason", {"message": "Halted: credentials invalid"})
-            self.emit("connection", {"connected": False, "account": "", "cash_balance": 0.0})
+            reason = self.kalshi.last_error or "Halted: credentials invalid"
+            self.emit("status_reason", {"message": reason})
+            self.emit("connection", {"connected": False, "account": "", "cash_balance": 0.0, "verified": False})
             return
 
         summary = await self.kalshi.get_account_summary()
@@ -57,6 +58,7 @@ class AppController:
                 "cash_balance": summary["cash_balance"],
                 "strategy_mode": strategy_mode,
                 "broker_mode": broker_mode,
+                "verified": summary.get("verified", False),
             },
         )
         self.emit("status_reason", {"message": f"Connected to Kalshi account: {self.kalshi.account_label}"})
@@ -75,7 +77,7 @@ class AppController:
         if self._task:
             await self._task
         await self.kalshi.disconnect()
-        self.emit("connection", {"connected": False, "account": "", "cash_balance": 0.0})
+        self.emit("connection", {"connected": False, "account": "", "cash_balance": 0.0, "verified": False})
         self.state.transition(AppState.IDLE)
         self.emit("state", {"state": self.state.state})
 

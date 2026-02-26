@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self._controller: AppController | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._controller_ready = threading.Event()
         self._build_ui()
         self._load_credentials()
 
@@ -64,7 +65,7 @@ class MainWindow(QMainWindow):
         self.cash_balance_label = QLabel("Cash Balance: $0.00")
         self.session_pnl_label = QLabel("Session PnL: $0.00")
         self.trade_count_label = QLabel("Trades: 0")
-        self.polling_label = QLabel("Poll/min — strike: 0 | orderbook: 0 | open orders: 0")
+        self.polling_label = QLabel("Poll/min — strike: 0 | orderbook: 0 | open orders: 0 (paper sim)")
         metrics.addWidget(self.cash_balance_label, 0, 0)
         metrics.addWidget(self.session_pnl_label, 0, 1)
         metrics.addWidget(self.trade_count_label, 0, 2)
@@ -169,13 +170,16 @@ class MainWindow(QMainWindow):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._controller = AppController(self.settings, self._emit)
+        self._controller_ready.set()
         self._loop.run_forever()
 
     def _ensure_thread(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if self._thread and self._thread.is_alive() and self._controller is not None and self._loop is not None:
             return
+        self._controller_ready.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+        self._controller_ready.wait(timeout=3)
 
     def start_bot(self) -> None:
         if not self._apply_runtime_settings():
@@ -192,6 +196,9 @@ class MainWindow(QMainWindow):
             return
 
         self._ensure_thread()
+        if self._controller is None or self._loop is None:
+            QMessageBox.warning(self, "Startup error", "Controller thread failed to initialize. Please restart app.")
+            return
         broker_mode = "live" if self.live.isChecked() else "paper"
         coro = self._controller.start(self.api_key.text().strip(), api_secret, broker_mode, self.mode.currentText())
         asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -210,7 +217,9 @@ class MainWindow(QMainWindow):
             self.logs.append(f"STATE {payload['state']}")
         elif kind == "connection":
             if payload.get("connected"):
-                self.connection_status.setText(f"Kalshi: Connected ({payload.get('account', 'Unknown')})")
+                verified = payload.get("verified", False)
+                verify_text = "verified" if verified else "unverified"
+                self.connection_status.setText(f"Kalshi: Connected ({payload.get('account', 'Unknown')}, {verify_text})")
                 self.cash_balance_label.setText(f"Cash Balance: ${payload.get('cash_balance', 0.0):,.2f}")
             else:
                 self.connection_status.setText("Kalshi: Disconnected")
