@@ -34,7 +34,7 @@ def test_controller_passes_selected_environment_to_connect(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
 
-    async def fake_loop(strategy_mode: str):
+    async def fake_loop(strategy_mode: str, broker_mode: str):
         await asyncio.sleep(0.01)
 
     monkeypatch.setattr(controller, "_loop", fake_loop)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,14 +23,37 @@ except ModuleNotFoundError:  # pragma: no cover
     padding = None
 
 
+FIFTEEN_MIN_RE = re.compile(r"\b(15\s*-?\s*(M|MIN|MINS|MINUTE|MINUTES))\b", re.IGNORECASE)
+ONE_HOUR_RE = re.compile(r"\b(1\s*-?\s*(H|HR|HRS|HOUR|HOURS)|HOURLY)\b", re.IGNORECASE)
+
+
 @dataclass
 class Market:
     ticker: str
-    bid: int
-    ask: int
+    yes_bid: int
+    yes_ask: int
+    no_bid: int
+    no_ask: int
     midpoint: float
     seconds_to_expiry: int
     active: bool = True
+    title: str = ""
+
+    @property
+    def bid(self) -> int:
+        return self.yes_bid
+
+    @bid.setter
+    def bid(self, value: int) -> None:
+        self.yes_bid = int(value)
+
+    @property
+    def ask(self) -> int:
+        return self.yes_ask
+
+    @ask.setter
+    def ask(self, value: int) -> None:
+        self.yes_ask = int(value)
 
 
 @dataclass
@@ -102,6 +126,48 @@ class KalshiClient:
             self._http = httpx.AsyncClient(base_url=self.base_url, timeout=10.0)
         headers = self._auth_headers(method, path) if auth else {}
         return await self._http.request(method, path, params=params, json=json, headers=headers)
+
+    def _market_text(self, item: dict) -> str:
+        ticker = str(item.get("ticker", ""))
+        title = str(item.get("title", ""))
+        return f"{ticker} {title}".upper()
+
+    def _extract_close_dt(self, item: dict) -> datetime | None:
+        for field in ("close_time", "expiration_time", "expiration_datetime", "end_date"):
+            value = item.get(field)
+            if not value:
+                continue
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        return None
+
+    def _classify_btc_interval(self, item: dict) -> str | None:
+        text = self._market_text(item)
+        has_btc = "BTC" in text
+        if not has_btc:
+            return None
+
+        has_15 = bool(FIFTEEN_MIN_RE.search(text))
+        has_1h = bool(ONE_HOUR_RE.search(text))
+
+        if has_15 and not has_1h:
+            return "15m"
+        if has_1h and not has_15:
+            return "1h"
+        if has_15 and has_1h:
+            return None
+
+        close_dt = self._extract_close_dt(item)
+        if close_dt is None:
+            return None
+        minute = close_dt.astimezone(timezone.utc).minute
+        if minute == 0:
+            return "1h"
+        if minute in {15, 30, 45}:
+            return "15m"
+        return None
 
     async def connect(self, api_key: str, api_secret: str, environment: str) -> bool:
         self.last_error = ""
@@ -197,7 +263,14 @@ class KalshiClient:
         best_yes_bid = max((int(level[0]) for level in yes_bids), default=0)
         best_no_bid = max((int(level[0]) for level in no_bids), default=0)
         best_yes_ask = 100 - best_no_bid if best_no_bid else 100
-        return {"best_bid": best_yes_bid, "best_ask": best_yes_ask, "raw": payload}
+        best_no_ask = 100 - best_yes_bid if best_yes_bid else 100
+        return {
+            "best_yes_bid": best_yes_bid,
+            "best_yes_ask": best_yes_ask,
+            "best_no_bid": best_no_bid,
+            "best_no_ask": best_no_ask,
+            "raw": payload,
+        }
 
     async def list_btc_markets(self, mode: str) -> list[Market]:
         response = await self._request("GET", f"{self.REST_PREFIX}/markets", params={"status": "open"}, auth=False)
@@ -207,29 +280,32 @@ class KalshiClient:
         selected: list[Market] = []
 
         for item in markets:
-            ticker = str(item.get("ticker", ""))
-            title = str(item.get("title", ""))
-            if "BTC" not in ticker.upper() and "BTC" not in title.upper():
-                continue
-            if mode == "15m" and "15" not in ticker and "15" not in title:
-                continue
-            if mode == "1h" and "1H" not in ticker.upper() and "HOUR" not in title.upper():
+            if self._classify_btc_interval(item) != mode:
                 continue
 
             yes_bid = int(item.get("yes_bid", 0) or 0)
             no_bid = int(item.get("no_bid", 0) or 0)
-            ask = 100 - no_bid if no_bid else 100
-            midpoint = (yes_bid + ask) / 2
+            yes_ask = 100 - no_bid if no_bid else 100
+            no_ask = 100 - yes_bid if yes_bid else 100
+            midpoint = (yes_bid + yes_ask) / 2
 
-            close_time_str = item.get("close_time") or item.get("expiration_time")
+            close_dt = self._extract_close_dt(item)
             seconds_to_expiry = 0
-            if close_time_str:
-                try:
-                    close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                    seconds_to_expiry = max(0, int((close_dt - now).total_seconds()))
-                except ValueError:
-                    seconds_to_expiry = 0
+            if close_dt is not None:
+                seconds_to_expiry = max(0, int((close_dt - now).total_seconds()))
 
-            selected.append(Market(ticker=ticker, bid=yes_bid, ask=ask, midpoint=midpoint, seconds_to_expiry=seconds_to_expiry, active=bool(item.get("open", True))))
+            selected.append(
+                Market(
+                    ticker=str(item.get("ticker", "")),
+                    title=str(item.get("title", "")),
+                    yes_bid=yes_bid,
+                    yes_ask=yes_ask,
+                    no_bid=no_bid,
+                    no_ask=no_ask,
+                    midpoint=midpoint,
+                    seconds_to_expiry=seconds_to_expiry,
+                    active=bool(item.get("open", True)),
+                )
+            )
 
         return selected

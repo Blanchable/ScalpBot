@@ -28,7 +28,7 @@ class AppController:
         self.emit = emit
         self.state = StateManager()
         self.kalshi = KalshiClient()
-        self.feed = BTCReferenceFeed()
+        self.feed = BTCReferenceFeed(stale_seconds=settings.global_settings.feed_stale_seconds)
         self._task: asyncio.Task | None = None
         self._running = False
         gs = settings.global_settings
@@ -69,7 +69,7 @@ class AppController:
         self.emit("market_mode", {"strategy_mode": strategy_mode})
         self.emit("session_metrics", {"session_pnl": self.session_realized_pnl, "trade_count": self.trade_count})
         self._running = True
-        self._task = asyncio.create_task(self._loop(strategy_mode))
+        self._task = asyncio.create_task(self._loop(strategy_mode, broker_mode))
 
     async def stop(self) -> None:
         if not self._running:
@@ -100,7 +100,10 @@ class AppController:
         self.polling_counts = {"market": 0, "orderbook": 0, "open_orders": 0}
         self._polling_window_start = time.time()
 
-    async def _loop(self, strategy_mode: str) -> None:
+    def _is_http_error(self, exc: Exception) -> bool:
+        return httpx is not None and isinstance(exc, httpx.HTTPError)
+
+    async def _loop(self, strategy_mode: str, broker_mode: str) -> None:
         self.state.transition(AppState.SCANNING)
         self.emit("state", {"state": self.state.state})
 
@@ -112,13 +115,19 @@ class AppController:
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 
+            tick = await self.feed.get_tick()
+            if tick.is_stale:
+                self.emit("status_reason", {"message": "Skipping entry: BTC feed stale"})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
             try:
                 markets = await self.kalshi.list_btc_markets(strategy_mode)
                 self.polling_counts["market"] += 1
                 open_orders = await self.kalshi.get_open_orders()
                 self.polling_counts["open_orders"] += 1
             except Exception as exc:
-                if httpx is not None and isinstance(exc, httpx.HTTPError):
+                if self._is_http_error(exc):
                     self.emit("status_reason", {"message": f"Kalshi request error: {exc}"})
                     await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                     continue
@@ -130,6 +139,8 @@ class AppController:
                 mode_cfg.min_price_cents,
                 mode_cfg.max_price_cents,
                 mode_cfg.no_entry_before_expiry_seconds,
+                mode_cfg.preferred_mid_low,
+                mode_cfg.preferred_mid_high,
             )
             if not ranked:
                 self.emit("status_reason", {"message": "Scanning: no BTC candidates passed filters"})
@@ -141,72 +152,98 @@ class AppController:
                 book = await self.kalshi.get_orderbook_snapshot(chosen.ticker)
                 self.polling_counts["orderbook"] += 1
             except Exception as exc:
-                if httpx is not None and isinstance(exc, httpx.HTTPError):
+                if self._is_http_error(exc):
                     self.emit("status_reason", {"message": f"Orderbook error for {chosen.ticker}: {exc}"})
                     await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                     continue
                 raise
 
             self._emit_polling_metrics_if_due()
-            chosen.bid = int(book.get("best_bid", chosen.bid))
-            chosen.ask = int(book.get("best_ask", chosen.ask))
+            chosen.yes_bid = int(book.get("best_yes_bid", chosen.yes_bid))
+            chosen.yes_ask = int(book.get("best_yes_ask", chosen.yes_ask))
+            chosen.no_bid = int(book.get("best_no_bid", chosen.no_bid))
+            chosen.no_ask = int(book.get("best_no_ask", chosen.no_ask))
 
-            tick = await self.feed.get_tick()
-            signal = generate_signal(chosen, tick, mode_cfg.min_edge_after_friction_cents)
+            signal = generate_signal(chosen, tick, mode_cfg, strategy_mode)
             self.emit(
                 "market",
                 {
                     "ticker": chosen.ticker,
-                    "bid": chosen.bid,
-                    "ask": chosen.ask,
+                    "bid": chosen.yes_bid,
+                    "ask": chosen.yes_ask,
                     "score": signal.score,
                     "strategy_mode": strategy_mode,
                     "open_orders": len(open_orders),
+                    "edge": round(signal.edge_cents, 2),
+                    "side": signal.side,
                 },
             )
             self.emit("market_mode", {"strategy_mode": strategy_mode, "selected_market": chosen.ticker})
 
-            if signal.score >= mode_cfg.min_signal_score:
-                self.state.transition(AppState.PENDING_ENTRY)
-                self.emit("state", {"state": self.state.state})
-                try:
-                    order = await self.kalshi.place_limit_order(chosen.ticker, signal.side, 1, chosen.ask)
-                except Exception as exc:
-                    if not ((httpx is not None and isinstance(exc, httpx.HTTPError)) or isinstance(exc, ValueError)):
-                        raise
-                    self.emit("order", {"ticker": chosen.ticker, "side": signal.side, "price": chosen.ask, "status": f"rejected: {exc}"})
-                    self.state.transition(AppState.SCANNING)
-                    self.emit("state", {"state": self.state.state})
-                    await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
-                    continue
+            if open_orders:
+                self.emit("status_reason", {"message": "Skipping entry: open orders already exist"})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
 
+            if not signal.should_trade:
+                self.emit("status_reason", {"message": f"Skipping entry: {signal.reasons[0] if signal.reasons else 'no signal'}"})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
+            if signal.score < mode_cfg.min_signal_score:
+                self.emit("status_reason", {"message": f"Skipping entry: signal score {signal.score} below threshold"})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
+            self.state.transition(AppState.PENDING_ENTRY)
+            self.emit("state", {"state": self.state.state})
+            try:
+                order = await self.kalshi.place_limit_order(chosen.ticker, signal.side, 1, signal.limit_price)
+            except Exception as exc:
+                if not (self._is_http_error(exc) or isinstance(exc, ValueError)):
+                    raise
                 self.emit(
                     "order",
                     {
                         "ticker": chosen.ticker,
                         "side": signal.side,
-                        "price": chosen.ask,
-                        "status": order.status,
-                        "order_id": order.order_id,
+                        "price": signal.limit_price,
+                        "status": f"rejected: {exc}",
+                        "edge": round(signal.edge_cents, 2),
                     },
                 )
-
-                # PnL calculation remains simplistic until fill lifecycle is added.
-                pnl = 0.0
-                self.session_realized_pnl += pnl
-                self.trade_count += 1
-                self.emit(
-                    "trade",
-                    {
-                        "ticker": chosen.ticker,
-                        "entry": chosen.ask,
-                        "exit": order.fill_price if order.fill_price is not None else chosen.ask,
-                        "pnl": pnl,
-                        "reason": "live_order_submitted",
-                    },
-                )
-                self.emit("session_metrics", {"session_pnl": self.session_realized_pnl, "trade_count": self.trade_count})
                 self.state.transition(AppState.SCANNING)
                 self.emit("state", {"state": self.state.state})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
+            self.emit(
+                "order",
+                {
+                    "ticker": chosen.ticker,
+                    "side": signal.side,
+                    "price": signal.limit_price,
+                    "status": order.status,
+                    "order_id": order.order_id,
+                    "edge": round(signal.edge_cents, 2),
+                },
+            )
+
+            pnl = 0.0
+            self.session_realized_pnl += pnl
+            self.trade_count += 1
+            self.emit(
+                "trade",
+                {
+                    "ticker": chosen.ticker,
+                    "entry": signal.limit_price,
+                    "exit": order.fill_price if order.fill_price is not None else signal.limit_price,
+                    "pnl": pnl,
+                    "reason": "live_order_submitted",
+                },
+            )
+            self.emit("session_metrics", {"session_pnl": self.session_realized_pnl, "trade_count": self.trade_count})
+            self.state.transition(AppState.SCANNING)
+            self.emit("state", {"state": self.state.state})
 
             await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)

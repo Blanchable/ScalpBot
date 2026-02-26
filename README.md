@@ -62,3 +62,10 @@ pytest -q
 - REST authentication and account balance verification are real Kalshi calls.
 - Market discovery and orderbook requests are live Kalshi REST calls.
 - Strategy and order lifecycle handling are still intentionally minimal and should be hardened before unattended production use.
+
+
+## Strategy selection notes
+
+- BTC interval classification is mode-exclusive: explicit 15m markers route only to `15m`, explicit 1h markers route only to `1h`, ambiguous markers are rejected.
+- If explicit markers are missing, close-time fallback is used: minute `00` maps to `1h`, minutes `15/30/45` map to `15m`, all other minutes are rejected.
+- Entry logic uses side-correct pricing (`buy_yes -> yes_ask`, `buy_no -> no_ask`) and skips entries on stale feed, insufficient edge, low score, or existing open orders.

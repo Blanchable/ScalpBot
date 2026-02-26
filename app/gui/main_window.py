@@ -209,8 +209,6 @@ class MainWindow(QMainWindow):
     def stop_bot(self) -> None:
         if self._controller and self._loop:
             asyncio.run_coroutine_threadsafe(self._controller.stop(), self._loop)
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
 
     def on_event(self, kind: str, payload: dict) -> None:
         if kind == "state":
