@@ -19,6 +19,14 @@ class SecretStore:
         # Store encrypted credential payload in a .key file as requested.
         self.secret_path = base_dir / "credentials.secret.key"
 
+    def set_key_file(self, key_file: Path) -> None:
+        key_file = key_file.expanduser().resolve()
+        if key_file.suffix.lower() != ".key":
+            raise ValueError("Secret key path must use a .key file")
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        self.key_path = key_file
+        self.secret_path = key_file.with_name(f"{key_file.stem}.secret.key")
+
     def _migrate_legacy_paths(self) -> None:
         legacy_secret_path = self.base_dir / "credentials.enc"
         if legacy_secret_path.exists() and not self.secret_path.exists():

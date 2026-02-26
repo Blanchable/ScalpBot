@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -22,8 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config.settings import AppSettings
 from app.config.secrets import SecretStore
+from app.config.settings import AppSettings
 from app.core.controller import AppController
 
 
@@ -59,11 +60,23 @@ class MainWindow(QMainWindow):
         self.api_key = QLineEdit()
         self.api_secret = QLineEdit()
         self.api_secret.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.key_file_input = QLineEdit(str(self.secret_store.key_path))
+        self.key_file_input.setReadOnly(True)
+        self.browse_key_btn = QPushButton("Browse .key...")
+        self.browse_key_btn.clicked.connect(self.browse_secret_key_file)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.key_file_input)
+        key_row.addWidget(self.browse_key_btn)
+        key_row_widget = QWidget()
+        key_row_widget.setLayout(key_row)
+
         self.mode = QComboBox()
         self.mode.addItems(["15m", "1h"])
         self.live = QCheckBox("Enable LIVE mode")
         form.addRow("API Key", self.api_key)
         form.addRow("API Secret", self.api_secret)
+        form.addRow("Secret Key File", key_row_widget)
         form.addRow("Strategy Mode", self.mode)
         form.addRow("", self.live)
         ctrl.addLayout(form)
@@ -93,6 +106,23 @@ class MainWindow(QMainWindow):
         self.logs = QTextEdit()
         self.logs.setReadOnly(True)
         layout.addWidget(self.logs)
+
+    def browse_secret_key_file(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Secret Key File",
+            str(self.secret_store.key_path.parent),
+            "Key Files (*.key)",
+        )
+        if not selected:
+            return
+        try:
+            self.secret_store.set_key_file(Path(selected))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid key file", str(exc))
+            return
+        self.key_file_input.setText(str(self.secret_store.key_path))
+        self._load_credentials()
 
     def _load_credentials(self) -> None:
         api_key, api_secret = self.secret_store.load_credentials()
