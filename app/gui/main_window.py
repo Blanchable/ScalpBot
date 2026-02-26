@@ -53,13 +53,13 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         self.status = QLabel("Idle: waiting for user to start")
+        self.connection_status = QLabel("Kalshi: Disconnected")
         layout.addWidget(self.status)
+        layout.addWidget(self.connection_status)
 
         ctrl = QHBoxLayout()
         form = QFormLayout()
         self.api_key = QLineEdit()
-        self.api_secret = QLineEdit()
-        self.api_secret.setEchoMode(QLineEdit.EchoMode.Password)
 
         self.key_file_input = QLineEdit(str(self.secret_store.key_path))
         self.key_file_input.setReadOnly(True)
@@ -75,7 +75,6 @@ class MainWindow(QMainWindow):
         self.mode.addItems(["15m", "1h"])
         self.live = QCheckBox("Enable LIVE mode")
         form.addRow("API Key", self.api_key)
-        form.addRow("API Secret", self.api_secret)
         form.addRow("Secret Key File", key_row_widget)
         form.addRow("Strategy Mode", self.mode)
         form.addRow("", self.live)
@@ -125,13 +124,13 @@ class MainWindow(QMainWindow):
         self._load_credentials()
 
     def _load_credentials(self) -> None:
-        api_key, api_secret = self.secret_store.load_credentials()
+        api_key, _ = self.secret_store.load_credentials()
         self.api_key.setText(api_key)
-        self.api_secret.setText(api_secret)
+        self.key_file_input.setText(str(self.secret_store.key_path))
 
     def save_credentials(self) -> None:
-        self.secret_store.save_credentials(self.api_key.text(), self.api_secret.text())
-        QMessageBox.information(self, "Saved", "Credentials stored successfully.")
+        self.secret_store.save_credentials(self.api_key.text())
+        QMessageBox.information(self, "Saved", "API key and key-file path stored successfully.")
 
     def _emit(self, kind: str, payload: dict) -> None:
         self.bus.event.emit(kind, payload)
@@ -153,9 +152,14 @@ class MainWindow(QMainWindow):
             confirm = QMessageBox.question(self, "Confirm live mode", "Switch to LIVE mode?")
             if confirm != QMessageBox.StandardButton.Yes:
                 return
+        try:
+            api_secret = self.secret_store.read_secret_key()
+        except FileNotFoundError as exc:
+            QMessageBox.warning(self, "Missing key file", str(exc))
+            return
         self._ensure_thread()
         broker_mode = "live" if self.live.isChecked() else "paper"
-        coro = self._controller.start(self.api_key.text(), self.api_secret.text(), broker_mode, self.mode.currentText())
+        coro = self._controller.start(self.api_key.text().strip(), api_secret, broker_mode, self.mode.currentText())
         asyncio.run_coroutine_threadsafe(coro, self._loop)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -170,6 +174,11 @@ class MainWindow(QMainWindow):
         if kind == "state":
             self.status.setText(f"State: {payload['state']}")
             self.logs.append(f"STATE {payload['state']}")
+        elif kind == "connection":
+            if payload.get("connected"):
+                self.connection_status.setText(f"Kalshi: Connected ({payload.get('account', 'Unknown')})")
+            else:
+                self.connection_status.setText("Kalshi: Disconnected")
         elif kind == "status_reason":
             self.status.setText(payload["message"])
             self.logs.append(payload["message"])

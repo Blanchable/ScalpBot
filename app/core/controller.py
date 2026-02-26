@@ -40,7 +40,10 @@ class AppController:
         if not ok:
             self.state.transition(AppState.HALTED)
             self.emit("status_reason", {"message": "Halted: credentials invalid"})
+            self.emit("connection", {"connected": False, "account": ""})
             return
+        self.emit("connection", {"connected": True, "account": self.kalshi.account_label})
+        self.emit("status_reason", {"message": f"Connected to Kalshi account: {self.kalshi.account_label}"})
         self._running = True
         self._task = asyncio.create_task(self._loop(strategy_mode, broker_mode))
 
@@ -54,6 +57,7 @@ class AppController:
         if self._task:
             await self._task
         await self.kalshi.disconnect()
+        self.emit("connection", {"connected": False, "account": ""})
         self.state.transition(AppState.IDLE)
         self.emit("state", {"state": self.state.state})
 

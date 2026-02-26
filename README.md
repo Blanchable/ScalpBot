@@ -7,6 +7,7 @@ A desktop GUI trading bot scaffold for BTC interval scalp trading on Kalshi with
 - Windows one-click setup + launch (`scripts/setup_and_launch.bat`)
 - PySide6 desktop control center
 - Strategy mode switch (15m / 1h)
+- Kalshi connection status indicator with connected account label
 - Paper mode default; live mode explicit toggle confirmation
 - Credential storage (encrypted local file)
 - Async controller loop with explicit bot states
@@ -20,10 +21,11 @@ A desktop GUI trading bot scaffold for BTC interval scalp trading on Kalshi with
 
 1. Double-click `scripts/setup_and_launch.bat`
 2. Wait for first-run setup
-3. Enter API key/secret in GUI and save
-4. Choose mode (`15m` or `1h`)
-5. Leave live toggle OFF for paper mode
-6. Click **Start Bot**
+3. Enter your Kalshi API key in GUI and choose your secret `.key` file
+4. Save credentials (stores API key + selected key-file path)
+5. Choose mode (`15m` or `1h`)
+6. Leave live toggle OFF for paper mode
+7. Click **Start Bot**
 
 ## Manual run (dev)
 
