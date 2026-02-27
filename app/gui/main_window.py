@@ -62,13 +62,15 @@ class MainWindow(QMainWindow):
 
         metrics = QGridLayout()
         self.cash_balance_label = QLabel("Cash Balance: $0.00")
-        self.session_pnl_label = QLabel("Session PnL: $0.00")
+        self.session_pnl_label = QLabel("Session Realized PnL: $0.00")
+        self.session_unrealized_label = QLabel("Session Unrealized PnL: $0.00")
         self.trade_count_label = QLabel("Trades: 0")
         self.polling_label = QLabel("Poll/min — strike: 0 | orderbook: 0 | open orders: 0")
         metrics.addWidget(self.cash_balance_label, 0, 0)
         metrics.addWidget(self.session_pnl_label, 0, 1)
-        metrics.addWidget(self.trade_count_label, 0, 2)
-        metrics.addWidget(self.polling_label, 1, 0, 1, 3)
+        metrics.addWidget(self.session_unrealized_label, 0, 2)
+        metrics.addWidget(self.trade_count_label, 0, 3)
+        metrics.addWidget(self.polling_label, 1, 0, 1, 4)
         layout.addLayout(metrics)
 
         top = QHBoxLayout()
@@ -95,7 +97,7 @@ class MainWindow(QMainWindow):
         form.addRow("Environment", self.environment)
         form.addRow("Strategy Mode", self.mode)
 
-        self.max_pos_input = QLineEdit(str(self.settings.global_settings.max_position_size))
+        self.max_pos_input = QLineEdit(str(self.settings.global_settings.max_simultaneous_positions))
         self.daily_loss_input = QLineEdit(str(self.settings.global_settings.daily_max_loss))
         self.scan_interval_input = QLineEdit(str(self.settings.global_settings.scan_interval_seconds))
         form.addRow("Max Position Size", self.max_pos_input)
@@ -122,8 +124,8 @@ class MainWindow(QMainWindow):
         self.market_table.setHorizontalHeaderLabels(["Ticker", "YES Bid", "YES Ask", "NO Bid", "NO Ask", "Preferred Side", "Signal Score", "Quote Source", "Stale"])
         layout.addWidget(self.market_table)
 
-        self.trade_table = QTableWidget(0, 4)
-        self.trade_table.setHorizontalHeaderLabels(["Ticker", "Entry", "Exit", "PnL"])
+        self.trade_table = QTableWidget(0, 5)
+        self.trade_table.setHorizontalHeaderLabels(["Ticker", "Side", "Entry", "Exit", "PnL"])
         layout.addWidget(self.trade_table)
 
         self.logs = QTextEdit()
@@ -163,6 +165,7 @@ class MainWindow(QMainWindow):
 
     def _apply_runtime_settings(self) -> bool:
         try:
+            self.settings.global_settings.max_simultaneous_positions = int(self.max_pos_input.text())
             self.settings.global_settings.max_position_size = int(self.max_pos_input.text())
             self.settings.global_settings.daily_max_loss = float(self.daily_loss_input.text())
             self.settings.global_settings.scan_interval_seconds = max(0.2, float(self.scan_interval_input.text()))
@@ -239,7 +242,8 @@ class MainWindow(QMainWindow):
             chosen = payload.get("selected_market", "awaiting selection")
             self.market_mode_status.setText(f"Market Mode: {mode} | Selected: {chosen}")
         elif kind == "session_metrics":
-            self.session_pnl_label.setText(f"Session PnL: ${payload.get('session_pnl', 0.0):,.2f}")
+            self.session_pnl_label.setText(f"Session Realized PnL: ${payload.get('session_pnl', 0.0):,.2f}")
+            self.session_unrealized_label.setText(f"Session Unrealized PnL: ${payload.get('session_unrealized_pnl', 0.0):,.2f}")
             self.trade_count_label.setText(f"Trades: {payload.get('trade_count', 0)}")
         elif kind == "polling_stats":
             self.polling_label.setText(
@@ -263,11 +267,16 @@ class MainWindow(QMainWindow):
             self.market_table.setItem(0, 8, QTableWidgetItem("yes" if payload.get("quote_stale") else "no"))
         elif kind == "order":
             self.logs.append(f"ORDER {payload}")
+        elif kind == "position_opened":
+            self.logs.append(f"POSITION OPENED {payload}")
+        elif kind == "position_mark":
+            self.logs.append(f"POSITION MARK {payload}")
         elif kind == "trade":
             row = self.trade_table.rowCount()
             self.trade_table.insertRow(row)
             self.trade_table.setItem(row, 0, QTableWidgetItem(str(payload["ticker"])))
-            self.trade_table.setItem(row, 1, QTableWidgetItem(str(payload["entry"])))
-            self.trade_table.setItem(row, 2, QTableWidgetItem(str(payload["exit"])))
-            self.trade_table.setItem(row, 3, QTableWidgetItem(str(payload["pnl"])))
+            self.trade_table.setItem(row, 1, QTableWidgetItem(str(payload.get("side", "-"))))
+            self.trade_table.setItem(row, 2, QTableWidgetItem(str(payload["entry"])))
+            self.trade_table.setItem(row, 3, QTableWidgetItem(str(payload["exit"])))
+            self.trade_table.setItem(row, 4, QTableWidgetItem(str(payload["pnl"])))
             self.logs.append(f"TRADE {payload}")

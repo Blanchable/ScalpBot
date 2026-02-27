@@ -15,6 +15,10 @@ class TradeRow:
     exit_price: float
     net_pnl: float
     exit_reason: str
+    entry_order_id: str | None = None
+    exit_order_id: str | None = None
+    entry_time: str | None = None
+    exit_time: str | None = None
 
 
 class TradeRepository:
@@ -24,8 +28,12 @@ class TradeRepository:
     def add_trade(self, trade: TradeRow) -> None:
         self.conn.execute(
             """
-            INSERT INTO trades (market_ticker, strategy_mode, broker_mode, side, qty, entry_price, exit_price, net_pnl, exit_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (
+                market_ticker, strategy_mode, broker_mode, side, qty,
+                entry_order_id, exit_order_id, entry_time, exit_time,
+                entry_price, exit_price, net_pnl, exit_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade.market_ticker,
@@ -33,6 +41,10 @@ class TradeRepository:
                 trade.broker_mode,
                 trade.side,
                 trade.qty,
+                trade.entry_order_id,
+                trade.exit_order_id,
+                trade.entry_time,
+                trade.exit_time,
                 trade.entry_price,
                 trade.exit_price,
                 trade.net_pnl,

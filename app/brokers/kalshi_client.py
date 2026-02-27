@@ -407,15 +407,27 @@ class KalshiClient:
         response.raise_for_status()
         body = response.json()
         order = body.get("order", body)
-        filled_count = int(order.get("filled_count", 0) or 0)
+        status = str(order.get("status", "unknown")).lower()
         total_count = int(order.get("count", 0) or 0)
-        remaining_count = int(order.get("remaining_count", max(0, total_count - filled_count)) or 0)
+        remaining_count = int(order.get("remaining_count", 0) or 0)
+        if "remaining_count" not in order:
+            remaining_count = max(0, total_count - int(order.get("filled_count", 0) or 0))
+        filled_count_raw = order.get("filled_count")
+        if filled_count_raw is not None:
+            filled_count = int(filled_count_raw or 0)
+        elif total_count > 0:
+            filled_count = max(0, total_count - remaining_count)
+        elif status in {"executed", "filled"} and remaining_count == 0:
+            filled_count = total_count if total_count > 0 else 1
+        else:
+            filled_count = 0
         return {
             "order_id": str(order.get("order_id", order_id)),
             "status": str(order.get("status", "unknown")),
             "action": str(order.get("action", "")),
             "side": str(order.get("side", "")),
             "ticker": str(order.get("ticker", "")),
+            "submitted_count": total_count,
             "count": total_count,
             "remaining_count": remaining_count,
             "filled_count": filled_count,

@@ -599,3 +599,208 @@ def test_auto_cancel_old_bot_order_on_rollover(monkeypatch):
 
     asyncio.run(controller._cancel_stale_or_old_ticker_orders(current_ticker="NEW"))
     assert "oid" in canceled["ids"]
+
+
+def test_executed_entry_becomes_active_position_and_blocks_reentry(monkeypatch, tmp_path):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.db_path = tmp_path / "bot.sqlite3"
+    settings.global_settings.scan_interval_seconds = 0.1
+    settings.global_settings.max_simultaneous_positions = 1
+    controller = AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=9, momentum_15s=8, momentum_60s=7, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=52, yes_ask=53, no_bid=47, no_ask=48, midpoint=52, seconds_to_expiry=500)
+
+    async def fake_orderbook(ticker: str):
+        return {"best_yes_bid": 52, "best_yes_ask": 53, "best_no_bid": 47, "best_no_ask": 48}
+
+    async def fake_open_orders(*args, **kwargs):
+        return []
+
+    calls = {"place": 0}
+
+    async def fake_place_limit_order(*args, **kwargs):
+        calls["place"] += 1
+        return OrderResult(order_id="entry-1", status="submitted", fill_price=None)
+
+    async def fake_get_order_status(order_id: str):
+        return {"order_id": order_id, "status": "executed", "count": 1, "remaining_count": 0, "filled_count": 1, "yes_price": 53}
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
+    monkeypatch.setattr(controller.kalshi, "get_order_status", fake_get_order_status)
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "15m")
+        await asyncio.sleep(0.55)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    assert calls["place"] == 1
+    assert len(controller.active_positions) == 1
+    assert any(k == "position_opened" for k, _ in events)
+
+
+def test_trade_emits_on_close_and_persists(monkeypatch, tmp_path):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.db_path = tmp_path / "bot.sqlite3"
+    settings.global_settings.scan_interval_seconds = 0.1
+    settings.mode_settings["15m"].profit_target_cents = 1
+    settings.mode_settings["15m"].flatten_before_expiry_seconds = 1
+    controller = AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=9, momentum_15s=8, momentum_60s=7, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=60, yes_ask=61, no_bid=39, no_ask=40, midpoint=60, seconds_to_expiry=500)
+
+    async def fake_orderbook(ticker: str):
+        return {"best_yes_bid": 60, "best_yes_ask": 61, "best_no_bid": 39, "best_no_ask": 40}
+
+    async def fake_open_orders(*args, **kwargs):
+        return []
+
+    async def fake_cancel_order(order_id: str):
+        return True
+
+    def place_side_effect(ticker: str, side: str, qty: int, limit_price: float):
+        if side.startswith("buy"):
+            return OrderResult(order_id="entry-1", status="submitted", fill_price=None)
+        return OrderResult(order_id="exit-1", status="submitted", fill_price=None)
+
+    async def fake_place_limit_order(ticker: str, side: str, qty: int, limit_price: float):
+        return place_side_effect(ticker, side, qty, limit_price)
+
+    async def fake_get_order_status(order_id: str):
+        if order_id == "entry-1":
+            return {"order_id": "entry-1", "status": "executed", "count": 1, "remaining_count": 0, "filled_count": 1, "yes_price": 58}
+        return {"order_id": "exit-1", "status": "executed", "count": 1, "remaining_count": 0, "filled_count": 1, "yes_price": 60}
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "cancel_order", fake_cancel_order)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
+    monkeypatch.setattr(controller.kalshi, "get_order_status", fake_get_order_status)
+
+    monkeypatch.setattr("app.core.controller.generate_signal", lambda *args, **kwargs: Signal(score=99, edge_cents=5.0, side="buy_yes", should_trade=True, limit_price=61, fair_yes=65.0, reasons=[]))
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "15m")
+        await asyncio.sleep(0.85)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    trade_events = [payload for kind, payload in events if kind == "trade"]
+    assert len(trade_events) == 1
+    assert trade_events[0]["pnl"] == 0.02
+    assert controller.trade_count == 1
+    assert controller.session_realized_pnl == 0.02
+
+    from app.storage.db import connect
+    from app.storage.repositories import TradeRepository
+
+    conn = connect(settings.db_path)
+    rows = TradeRepository(conn).list_recent(limit=10)
+    assert len(rows) == 1
+
+
+def test_idempotent_executed_poll_does_not_duplicate_position(monkeypatch, tmp_path):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.db_path = tmp_path / "bot.sqlite3"
+    settings.global_settings.scan_interval_seconds = 0.1
+    controller = AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=9, momentum_15s=8, momentum_60s=7, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=52, yes_ask=53, no_bid=47, no_ask=48, midpoint=52, seconds_to_expiry=500)
+
+    async def fake_orderbook(ticker: str):
+        return {"best_yes_bid": 52, "best_yes_ask": 53, "best_no_bid": 47, "best_no_ask": 48}
+
+    async def fake_open_orders(*args, **kwargs):
+        return []
+
+    async def fake_place_limit_order(*args, **kwargs):
+        return OrderResult(order_id="entry-1", status="submitted", fill_price=None)
+
+    polls = {"n": 0}
+
+    async def fake_get_order_status(order_id: str):
+        polls["n"] += 1
+        return {"order_id": order_id, "status": "executed", "count": 1, "remaining_count": 0, "filled_count": 1, "yes_price": 53}
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
+    monkeypatch.setattr(controller.kalshi, "get_order_status", fake_get_order_status)
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "15m")
+        await asyncio.sleep(0.75)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    opened = [p for k, p in events if k == "position_opened"]
+    assert len(opened) == 1
+    assert len(controller.active_positions) == 1
