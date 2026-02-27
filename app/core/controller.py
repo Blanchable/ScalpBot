@@ -35,6 +35,7 @@ class AppController:
         self._active_strategy_mode = ""
         self._resolved_market: Market | None = None
         self._active_position_ticker: str | None = None
+        self._resting_bot_orders: dict[str, dict] = {}
         gs = settings.global_settings
         self.risk = RiskEngine(gs.daily_max_loss, gs.max_consecutive_losses, gs.max_simultaneous_positions)
         self.snapshot = RiskSnapshot()
@@ -101,6 +102,8 @@ class AppController:
         self._running = False
         if self._task:
             await self._task
+        if self.settings.global_settings.cancel_bot_resting_orders_on_stop:
+            await self._cancel_stale_or_old_ticker_orders(current_ticker=None, force_all=True)
         await self.kalshi.disconnect()
         self.invalidate_market_cache("stop")
         self._active_position_ticker = None
@@ -127,6 +130,35 @@ class AppController:
     def _is_http_error(self, exc: Exception) -> bool:
         return httpx is not None and isinstance(exc, httpx.HTTPError)
 
+
+    async def _cancel_stale_or_old_ticker_orders(self, current_ticker: str | None, force_all: bool = False) -> None:
+        timeout = self.settings.global_settings.resting_order_timeout_seconds
+        now_ts = time.time()
+        to_delete: list[str] = []
+        for oid, meta in list(self._resting_bot_orders.items()):
+            stale = (now_ts - meta.get("created_at", now_ts)) > timeout
+            wrong_ticker = current_ticker is not None and meta.get("ticker") != current_ticker
+            if force_all or stale or wrong_ticker:
+                try:
+                    ok = await self.kalshi.cancel_order(oid)
+                except Exception as exc:
+                    self.emit("status_reason", {"message": f"Auto-cancel failed for {oid}: {exc}"})
+                    ok = False
+                if ok:
+                    self.emit("status_reason", {"message": f"Auto-canceled stale bot order {oid} on {meta.get('ticker')}"})
+                    to_delete.append(oid)
+        for oid in to_delete:
+            self._resting_bot_orders.pop(oid, None)
+
+    def _filter_resting_orders_for_ticker(self, orders: list[dict], ticker: str) -> list[dict]:
+        filtered: list[dict] = []
+        for o in orders:
+            status = str(o.get("status", "")).lower()
+            remaining = int(o.get("remaining_count", o.get("count", 0)) or 0)
+            if status == "resting" and str(o.get("ticker", "")) == ticker and remaining > 0:
+                filtered.append(o)
+        return filtered
+
     def _should_reresolve_market(self, strategy_mode: str) -> bool:
         if self._resolved_market is None:
             return True
@@ -139,6 +171,9 @@ class AppController:
         return False
 
     async def _resolve_market(self, strategy_mode: str) -> Market | None:
+        if self._resolved_market and self._resolved_market.seconds_to_expiry <= self.settings.mode_settings[strategy_mode].rollover_before_expiry_seconds:
+            self.emit("status_reason", {"message": f"Rollover: current ticker {self._resolved_market.ticker} within {self.settings.mode_settings[strategy_mode].rollover_before_expiry_seconds}s of expiry"})
+            self._resolved_market = None
         if self._should_reresolve_market(strategy_mode):
             self._resolved_market = await self.kalshi.resolve_btc_target_market(strategy_mode)
             self.polling_counts["market"] += 1
@@ -154,6 +189,11 @@ class AppController:
                 "ticker": chosen.ticker,
                 "bid": chosen.yes_bid,
                 "ask": chosen.yes_ask,
+                "yes_bid": chosen.yes_bid,
+                "yes_ask": chosen.yes_ask,
+                "no_bid": chosen.no_bid,
+                "no_ask": chosen.no_ask,
+                "preferred_side": side,
                 "score": score,
                 "strategy_mode": self._active_strategy_mode,
                 "open_orders": open_orders,
@@ -187,7 +227,12 @@ class AppController:
 
             try:
                 market = await self._resolve_market(strategy_mode)
-                open_orders = await self.kalshi.get_open_orders()
+                
+                try:
+                    open_orders = await self.kalshi.get_open_orders(ticker=market.ticker if market else None, status="resting")
+                except TypeError:
+                    open_orders = await self.kalshi.get_open_orders()
+
                 self.polling_counts["open_orders"] += 1
             except Exception as exc:
                 if self._is_http_error(exc):
@@ -203,6 +248,8 @@ class AppController:
                 self.emit("status_reason", {"message": self.kalshi.last_market_resolution_reason or f"No active BTC {strategy_mode} target market"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
+
+            await self._cancel_stale_or_old_ticker_orders(current_ticker=market.ticker)
 
             # Soft gate only for absurd snapshot spreads, but still prefer fetching live quotes.
             snapshot_spread = market.yes_ask - market.yes_bid
@@ -257,11 +304,17 @@ class AppController:
             signal = generate_signal(market, tick, mode_cfg, strategy_mode)
             self._emit_market_payload(market, signal.score, len(open_orders), signal.side, signal.edge_cents, quote_source, quote_age_s, quote_stale)
 
-            if open_orders:
-                if any(str(o.get("ticker", "")) == market.ticker for o in open_orders):
-                    self.emit("status_reason", {"message": "Skipping entry: existing open order for ticker"})
-                else:
-                    self.emit("status_reason", {"message": "Skipping entry: open orders already exist"})
+            statuses: dict[str, int] = {}
+            tickers: list[str] = []
+            for o in open_orders:
+                st = str(o.get("status", "")).lower() or "unknown"
+                statuses[st] = statuses.get(st, 0) + 1
+                if len(tickers) < 5:
+                    tickers.append(str(o.get("ticker", "")))
+            blocking_orders = self._filter_resting_orders_for_ticker(open_orders, market.ticker)
+            self.emit("status_reason", {"message": f"Orders gate: raw_count={len(open_orders)} filtered_resting_same_ticker={len(blocking_orders)} statuses={statuses} tickers={tickers}"})
+            if blocking_orders:
+                self.emit("status_reason", {"message": "Skipping entry: open orders already exist for ticker"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
             if self._active_position_ticker == market.ticker:
@@ -292,7 +345,9 @@ class AppController:
                 continue
 
             self._active_position_ticker = market.ticker
-            self.emit("order", {"ticker": market.ticker, "side": signal.side, "price": limit_price, "status": order.status, "order_id": order.order_id, "edge": round(signal.edge_cents, 2)})
+            if order.order_id:
+                self._resting_bot_orders[order.order_id] = {"ticker": market.ticker, "created_at": time.time(), "side": signal.side}
+            self.emit("order", {"ticker": market.ticker, "side": signal.side, "price": limit_price, "status": order.status, "order_id": order.order_id, "edge": round(signal.edge_cents, 2), "preferred_side": signal.side})
 
             pnl = 0.0
             self.session_realized_pnl += pnl

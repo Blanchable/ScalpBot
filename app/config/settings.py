@@ -22,6 +22,7 @@ class ModeSettings:
     cooldown_after_loss_seconds: int
     min_signal_score: int
     resolver_soft_spread_cents: int = 6
+    rollover_before_expiry_seconds: int = 90
 
 
 @dataclass
@@ -43,9 +44,11 @@ class GlobalSettings:
     scan_interval_seconds: float = 1.0
     quote_stale_seconds: int = 5
     btc_15m_series_ticker: str = "KXBTC15M"
-    btc_1h_series_ticker: str = ""
+    btc_1h_series_ticker: str = "KXBTC1H"
     resolver_max_delta_seconds_15m: int = 1200
     resolver_max_delta_seconds_1h: int = 4200
+    resting_order_timeout_seconds: int = 20
+    cancel_bot_resting_orders_on_stop: bool = True
 
 
 @dataclass

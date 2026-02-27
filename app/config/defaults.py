@@ -18,9 +18,11 @@ DEFAULT_GLOBAL_SETTINGS = {
     "scan_interval_seconds": 1.0,
     "quote_stale_seconds": 5,
     "btc_15m_series_ticker": "KXBTC15M",
-    "btc_1h_series_ticker": "",
+    "btc_1h_series_ticker": "KXBTC1H",
     "resolver_max_delta_seconds_15m": 1200,
     "resolver_max_delta_seconds_1h": 4200,
+    "resting_order_timeout_seconds": 20,
+    "cancel_bot_resting_orders_on_stop": True,
 }
 
 DEFAULT_MODE_SETTINGS = {
@@ -39,6 +41,7 @@ DEFAULT_MODE_SETTINGS = {
         "cooldown_after_loss_seconds": 60,
         "min_signal_score": 65,
         "resolver_soft_spread_cents": 6,
+        "rollover_before_expiry_seconds": 90,
     },
     "1h": {
         "spread_filter_cents": 3,
@@ -55,5 +58,6 @@ DEFAULT_MODE_SETTINGS = {
         "cooldown_after_loss_seconds": 90,
         "min_signal_score": 65,
         "resolver_soft_spread_cents": 8,
+        "rollover_before_expiry_seconds": 300,
     },
 }

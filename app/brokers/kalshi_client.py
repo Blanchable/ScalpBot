@@ -25,7 +25,7 @@ from app.utils.time_utils import next_quarter_hour_utc, next_top_of_hour_utc, pa
 logger = logging.getLogger("APP.KALSHI")
 
 BTC_15M_SERIES_TICKER = "KXBTC15M"
-BTC_1H_SERIES_TICKER = ""
+BTC_1H_SERIES_TICKER = "KXBTC1H"
 DEFAULT_RESOLVER_MAX_DELTA_SECONDS_15M = 1200
 DEFAULT_RESOLVER_MAX_DELTA_SECONDS_1H = 4200
 MAX_MARKET_SCAN_ITEMS = 3000
@@ -246,10 +246,16 @@ class KalshiClient:
             raw_status=status,
         )
 
-    def _choose_nearest_market(self, markets: list[Market], target_close: datetime, max_delta_seconds: int) -> Market | None:
+    def _choose_nearest_market(self, markets: list[Market], target_close: datetime, max_delta_seconds: int, now_utc: datetime, rollover_buffer: int) -> Market | None:
         if not markets:
             return None
-        nearest = min(markets, key=lambda m: abs((m.close_time - target_close).total_seconds()) if m.close_time else 10**9)
+        future = [m for m in markets if m.close_time and m.close_time >= now_utc]
+        if not future:
+            self.last_market_resolution_reason = "No future active contracts available"
+            return None
+        preferred = [m for m in future if m.seconds_to_expiry > rollover_buffer]
+        pool = preferred if preferred else future
+        nearest = min(pool, key=lambda m: abs((m.close_time - target_close).total_seconds()) if m.close_time else 10**9)
         if nearest.close_time is None:
             return None
         delta = abs((nearest.close_time - target_close).total_seconds())
@@ -297,7 +303,8 @@ class KalshiClient:
             parsed.append(market)
 
         active = [m for m in parsed if m.raw_status == "active"]
-        chosen = self._choose_nearest_market(active, target_close, max_delta)
+        rollover_buffer = 90 if mode == "15m" else 300
+        chosen = self._choose_nearest_market(active, target_close, max_delta, now_utc, rollover_buffer)
 
         if chosen is None:
             base = (
@@ -376,11 +383,23 @@ class KalshiClient:
             "environment": self.environment,
         }
 
-    async def get_open_orders(self) -> list[dict]:
-        response = await self._request("GET", f"{self.REST_PREFIX}/portfolio/orders", auth=True)
+    async def get_open_orders(self, *, ticker: str | None = None, status: str | None = None) -> list[dict]:
+        params: dict[str, Any] = {}
+        if ticker:
+            params["ticker"] = ticker
+        if status:
+            params["status"] = status
+        response = await self._request("GET", f"{self.REST_PREFIX}/portfolio/orders", params=params or None, auth=True)
         response.raise_for_status()
-        orders = response.json().get("orders", [])
+        body = response.json()
+        orders = body.get("orders", []) if isinstance(body, dict) else []
         return orders if isinstance(orders, list) else []
+
+    async def cancel_order(self, order_id: str) -> bool:
+        response = await self._request("DELETE", f"{self.REST_PREFIX}/portfolio/orders/{order_id}", auth=True)
+        if getattr(response, "status_code", 500) >= 400:
+            return False
+        return True
 
     async def place_limit_order(self, market_ticker: str, signal_side: str, qty: int, limit_price: float) -> OrderResult:
         mapping = {
@@ -392,7 +411,7 @@ class KalshiClient:
         action, side, price_field = mapping[signal_side]
         payload = {
             "ticker": market_ticker,
-            "client_order_id": f"scalpbot-{int(time.time() * 1000)}",
+            "client_order_id": f"btcscalp-{int(time.time() * 1000)}",
             "type": "limit",
             "action": action,
             "side": side,
