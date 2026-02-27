@@ -18,11 +18,12 @@
     "btc_15m_series_ticker": "KXBTC15M",
     "btc_1h_series_ticker": "",
     "resolver_max_delta_seconds_15m": 1200,
-    "resolver_max_delta_seconds_1h": 4200
+    "resolver_max_delta_seconds_1h": 4200,
+    "quote_stale_seconds": 5
   },
   "mode_settings": {
     "15m": {
-      "spread_filter_cents": 2,
+      "spread_filter_cents": 3,
       "min_price_cents": 15,
       "max_price_cents": 85,
       "preferred_mid_low": 25,
@@ -34,10 +35,11 @@
       "no_entry_before_expiry_seconds": 90,
       "flatten_before_expiry_seconds": 45,
       "cooldown_after_loss_seconds": 60,
-      "min_signal_score": 65
+      "min_signal_score": 65,
+      "resolver_soft_spread_cents": 6
     },
     "1h": {
-      "spread_filter_cents": 2,
+      "spread_filter_cents": 3,
       "min_price_cents": 15,
       "max_price_cents": 85,
       "preferred_mid_low": 20,
@@ -49,7 +51,8 @@
       "no_entry_before_expiry_seconds": 300,
       "flatten_before_expiry_seconds": 120,
       "cooldown_after_loss_seconds": 90,
-      "min_signal_score": 65
+      "min_signal_score": 65,
+      "resolver_soft_spread_cents": 8
     }
   }
 }

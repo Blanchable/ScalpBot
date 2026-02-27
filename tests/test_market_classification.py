@@ -174,3 +174,35 @@ def test_orderbook_derives_asks_from_opposite_bid(monkeypatch):
     assert book["best_no_bid"] == 52
     assert book["best_yes_ask"] == 48
     assert book["best_no_ask"] == 53
+
+
+
+def test_fetch_open_markets_handles_cursor_pagination(monkeypatch):
+    c = KalshiClient()
+    calls = []
+
+    class Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    async def fake_request(method, path, **kwargs):
+        params = kwargs.get("params", {})
+        calls.append(params)
+        if "cursor" not in params:
+            return Resp({"markets": [{"ticker": "A"}], "cursor": "NEXT"})
+        return Resp({"markets": [{"ticker": "B"}]})
+
+    monkeypatch.setattr(c, "_request", fake_request)
+
+    import asyncio
+
+    items = asyncio.run(c._fetch_series_open_markets("KXBTC15M"))
+    assert [x["ticker"] for x in items] == ["A", "B"]
+    assert calls[0]["series_ticker"] == "KXBTC15M"
+    assert calls[1]["cursor"] == "NEXT"

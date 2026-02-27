@@ -21,6 +21,7 @@ class ModeSettings:
     flatten_before_expiry_seconds: int
     cooldown_after_loss_seconds: int
     min_signal_score: int
+    resolver_soft_spread_cents: int = 6
 
 
 @dataclass
@@ -40,6 +41,7 @@ class GlobalSettings:
     max_notional_exposure: float = 100.0
     feed_stale_seconds: int = 5
     scan_interval_seconds: float = 1.0
+    quote_stale_seconds: int = 5
     btc_15m_series_ticker: str = "KXBTC15M"
     btc_1h_series_ticker: str = ""
     resolver_max_delta_seconds_15m: int = 1200

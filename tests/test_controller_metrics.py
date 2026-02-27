@@ -419,3 +419,107 @@ def test_controller_1h_blank_series_reports_configuration_error(monkeypatch):
 
     reasons = [payload["message"] for kind, payload in events if kind == "status_reason"]
     assert any("1h series ticker is not configured" in msg.lower() for msg in reasons)
+
+
+
+def test_snapshot_wide_but_live_ok_not_rejected(monkeypatch):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    controller = AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=6, momentum_15s=6, momentum_60s=6, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=10, yes_ask=50, no_bid=50, no_ask=90, midpoint=30, seconds_to_expiry=500)
+
+    async def fake_open_orders():
+        return []
+
+    async def fake_orderbook(ticker: str):
+        return {"best_yes_bid": 49, "best_yes_ask": 52, "best_no_bid": 48, "best_no_ask": 51, "quote_ts": 1}
+
+    async def fake_place(*args, **kwargs):
+        return OrderResult(order_id="o", status="submitted", fill_price=None)
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place)
+
+    async def run():
+        await controller.start("k", "s", "paper", "15m")
+        await asyncio.sleep(0.4)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    reasons = [p["message"].lower() for k, p in events if k == "status_reason"]
+    assert not any("spread too wide" in r for r in reasons)
+
+
+def test_market_payload_marks_snapshot_fallback_stale(monkeypatch):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    settings.global_settings.quote_stale_seconds = 0
+    controller = AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=1, momentum_15s=1, momentum_60s=1, volatility=1, updated_at=0, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=49, yes_ask=50, no_bid=50, no_ask=51, midpoint=49.5, seconds_to_expiry=500)
+
+    async def fake_open_orders():
+        return []
+
+    async def bad_orderbook(*args, **kwargs):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", bad_orderbook)
+
+    async def run():
+        await controller.start("k", "s", "paper", "15m")
+        await asyncio.sleep(0.3)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    market_events = [p for k, p in events if k == "market"]
+    assert market_events
+    assert market_events[-1]["quote_source"] == "snapshot-fallback"
+    assert market_events[-1]["quote_stale"] is True

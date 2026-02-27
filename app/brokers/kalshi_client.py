@@ -145,7 +145,7 @@ class KalshiClient:
         headers = self._auth_headers(method, path) if auth else {}
         return await self._http.request(method, path, params=params, json=json, headers=headers)
 
-    def _get_mode_series_ticker(self, mode: str) -> str:
+    def _select_series_for_mode(self, mode: str) -> str:
         if mode == "15m":
             return self.btc_15m_series_ticker
         if mode == "1h":
@@ -264,7 +264,7 @@ class KalshiClient:
         self.last_market_resolution_reason = ""
         now_utc = (now or utc_now()).astimezone(timezone.utc)
         try:
-            series_ticker = self._get_mode_series_ticker(mode)
+            series_ticker = self._select_series_for_mode(mode)
         except ValueError as exc:
             self.last_market_resolution_reason = str(exc)
             return None
@@ -278,13 +278,16 @@ class KalshiClient:
 
         items = await self._fetch_series_open_markets(series_ticker)
         parsed: list[Market] = []
-        statuses: set[str] = set()
+        statuses: dict[str, int] = {}
         missing_close = 0
         unpriced = 0
+        ticker_samples: list[str] = []
         for item in items:
             status = str(item.get("status", "")).lower()
-            statuses.add(status or "unknown")
+            statuses[status or "unknown"] = statuses.get(status or "unknown", 0) + 1
             market = self._parse_market_from_list_item(item, now_utc)
+            if len(ticker_samples) < 5:
+                ticker_samples.append(f"{item.get('ticker','?')}@{item.get('close_time','?')}")
             if market is None:
                 if parse_api_datetime(str(item.get("close_time", ""))) is None:
                     missing_close += 1
@@ -300,7 +303,7 @@ class KalshiClient:
             base = (
                 f"Resolver miss mode={mode} series={series_ticker} target={target_close.isoformat()} "
                 f"returned={len(items)} parsed={len(parsed)} active={len(active)} "
-                f"statuses={sorted(statuses)} missing_close={missing_close} unpriced={unpriced}"
+                f"statuses={statuses} missing_close={missing_close} unpriced={unpriced} sample={ticker_samples}"
             )
             if self.last_market_resolution_reason:
                 self.last_market_resolution_reason = f"{base}; {self.last_market_resolution_reason}"
@@ -418,6 +421,7 @@ class KalshiClient:
             "best_no_bid": best_no_bid,
             "best_no_ask": best_no_ask,
             "raw": payload,
+            "quote_ts": time.time(),
         }
 
     async def list_btc_markets(self, mode: str) -> list[Market]:

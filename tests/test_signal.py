@@ -52,3 +52,11 @@ def test_signal_insufficient_edge_no_trade():
     tick = FeedTick(spot=65000, momentum_5s=0.1, momentum_15s=0.1, momentum_60s=0.1, volatility=2, updated_at=0, is_stale=False)
     sig = generate_signal(m, tick, mode_settings(), "15m")
     assert sig.should_trade is False
+
+
+
+def test_signal_can_exceed_threshold_in_realistic_case():
+    m = Market("A", yes_bid=44, yes_ask=45, no_bid=55, no_ask=56, midpoint=44.5, seconds_to_expiry=300)
+    tick = FeedTick(spot=65000, momentum_5s=12, momentum_15s=10, momentum_60s=11, volatility=1.5, updated_at=0, is_stale=False)
+    sig = generate_signal(m, tick, mode_settings(), "15m")
+    assert sig.score >= mode_settings().min_signal_score

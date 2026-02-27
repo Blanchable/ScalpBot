@@ -118,8 +118,8 @@ class MainWindow(QMainWindow):
         top.addLayout(btns)
         layout.addLayout(top)
 
-        self.market_table = QTableWidget(0, 4)
-        self.market_table.setHorizontalHeaderLabels(["Ticker", "Bid", "Ask", "Signal Score"])
+        self.market_table = QTableWidget(0, 7)
+        self.market_table.setHorizontalHeaderLabels(["Ticker", "Bid", "Ask", "Signal Score", "Quote Source", "Quote Age (s)", "Stale"])
         layout.addWidget(self.market_table)
 
         self.trade_table = QTableWidget(0, 4)
@@ -252,10 +252,13 @@ class MainWindow(QMainWindow):
             self.logs.append(payload["message"])
         elif kind == "market":
             self.market_table.setRowCount(1)
-            self.market_table.setItem(0, 0, QTableWidgetItem(str(payload["ticker"])))
-            self.market_table.setItem(0, 1, QTableWidgetItem(str(payload["bid"])))
-            self.market_table.setItem(0, 2, QTableWidgetItem(str(payload["ask"])))
-            self.market_table.setItem(0, 3, QTableWidgetItem(str(payload["score"])))
+            self.market_table.setItem(0, 0, QTableWidgetItem(str(payload.get("ticker", "-"))))
+            self.market_table.setItem(0, 1, QTableWidgetItem(str(payload.get("bid", "-"))))
+            self.market_table.setItem(0, 2, QTableWidgetItem(str(payload.get("ask", "-"))))
+            self.market_table.setItem(0, 3, QTableWidgetItem(str(payload.get("score", "-"))))
+            self.market_table.setItem(0, 4, QTableWidgetItem(str(payload.get("quote_source", "unknown"))))
+            self.market_table.setItem(0, 5, QTableWidgetItem(str(payload.get("quote_age_s", "-"))))
+            self.market_table.setItem(0, 6, QTableWidgetItem("yes" if payload.get("quote_stale") else "no"))
         elif kind == "order":
             self.logs.append(f"ORDER {payload}")
         elif kind == "trade":
