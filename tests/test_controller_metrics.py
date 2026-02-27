@@ -1,9 +1,10 @@
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
 
 from app.brokers.kalshi_client import Market, OrderResult
 from app.config.settings import AppSettings
-from app.core.controller import AppController, PositionState
+from app.core.controller import AppController, PendingOrderState, PositionState
 from app.feeds.btc_reference_feed import FeedTick
 from app.strategy.signal_engine import Signal
 from app.utils.constants import AppState
@@ -276,7 +277,7 @@ def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypat
     asyncio.run(run())
 
     reasons = [payload for kind, payload in events if kind == "status_reason"]
-    assert any("resolved market skipped" in r["message"].lower() for r in reasons)
+    assert any("validation:" in r["message"].lower() for r in reasons)
 
 
 
@@ -382,7 +383,7 @@ def test_controller_validation_reason_for_near_expiry(monkeypatch):
     asyncio.run(run())
 
     reasons = [payload["message"] for kind, payload in events if kind == "status_reason"]
-    assert any("resolved market skipped" in msg.lower() and "expiry" in msg.lower() for msg in reasons)
+    assert any("validation:" in msg.lower() and "expiry" in msg.lower() for msg in reasons)
 
 
 def test_controller_1h_blank_series_reports_configuration_error(monkeypatch):
@@ -998,3 +999,97 @@ def test_maker_first_entry_uses_bid_improved_limit(monkeypatch):
 
     asyncio.run(run())
     assert placed["price"] == 52
+
+
+def test_refresh_market_time_recomputes_seconds():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    now = datetime.now(timezone.utc)
+    m = Market("T", 50, 51, 49, 50, 50.5, seconds_to_expiry=999, close_time=now + timedelta(seconds=8))
+    assert controller._refresh_market_time(m, now) is True
+    assert 7 <= m.seconds_to_expiry <= 8
+
+
+def test_near_expiry_missing_pricing_invalidates_market():
+    events = []
+    settings = AppSettings()
+    controller = AppController(settings, lambda k, p: events.append((k, p)))
+    controller._active_strategy_mode = "15m"
+    market = Market("T", 0, 50, 0, 50, 50, seconds_to_expiry=80)
+    controller._resolved_market = market
+    cfg = settings.mode_settings["15m"]
+    for _ in range(cfg.invalidate_after_missing_pricing_polls):
+        controller._apply_market_invalid_counter("missing_pricing", market, cfg)
+    assert controller._resolved_market is None
+
+
+def test_near_expiry_spread_invalidates_market():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    market = Market("T", 40, 60, 40, 60, 50, seconds_to_expiry=80)
+    controller._resolved_market = market
+    cfg = settings.mode_settings["15m"]
+    for _ in range(cfg.invalidate_after_spread_reject_polls):
+        controller._apply_market_invalid_counter("spread", market, cfg)
+    assert controller._resolved_market is None
+
+
+def test_only_one_pending_exit_allowed(monkeypatch):
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    controller._position = PositionState("T", "yes", 55, 1, time.time(), "e", 1, True)
+    calls = {"n": 0}
+
+    async def fake_place(*args, **kwargs):
+        calls["n"] += 1
+        return OrderResult(order_id=f"x{calls['n']}", status="submitted")
+
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place)
+    m = Market("T", 54, 55, 45, 46, 54.5, 200)
+    asyncio.run(controller._submit_exit_order(m, "stop_loss"))
+    asyncio.run(controller._submit_exit_order(m, "stop_loss"))
+    assert calls["n"] == 1
+
+
+def test_stop_exit_slippage_guard_blocks_worse_reprice(monkeypatch):
+    events = []
+    settings = AppSettings()
+    controller = AppController(settings, lambda k, p: events.append((k, p)))
+    controller._active_strategy_mode = "15m"
+    cfg = settings.mode_settings["15m"]
+    cfg.allow_stop_exit_reprice = False
+    cfg.max_stop_exit_slippage_cents = 2
+    cfg.stop_exit_timeout_seconds = 0
+    controller._position = PositionState("T", "yes", 55, 1, time.time(), "e", 1, True)
+    controller._pending_exit = PendingOrderState(
+        order_id="exit1",
+        ticker="T",
+        side="sell_yes",
+        size=1,
+        limit_price_cents=53,
+        created_at_ts=time.time() - 5,
+        exit_reason="stop_loss",
+        trigger_mark_cents=53,
+        min_allowed_exit_cents=51,
+    )
+
+    async def fake_status(order_id: str):
+        return {"order_id": order_id, "status": "resting", "count": 1, "remaining_count": 1, "filled_count": 0}
+
+    async def fake_cancel(order_id: str):
+        return True
+
+    async def fake_place(*args, **kwargs):
+        raise AssertionError("should not reprice beyond cap")
+
+    monkeypatch.setattr(controller.kalshi, "get_order_status", fake_status)
+    monkeypatch.setattr(controller.kalshi, "cancel_order", fake_cancel)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place)
+
+    m = Market("T", 49, 50, 50, 51, 49.5, 150)
+    asyncio.run(controller._manage_pending_exit(m))
+    assert controller._pending_exit is not None
+    assert controller._pending_exit.guarded is True
+    assert any("slippage cap" in e[1]["message"] for e in events if e[0] == "status_reason")

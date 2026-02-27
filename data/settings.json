@@ -59,7 +59,17 @@
       "cooldown_after_exit_seconds": 8,
       "max_trades_per_contract": 3,
       "require_signal_reset_before_reentry": true,
-      "signal_reset_score_floor": 45
+      "signal_reset_score_floor": 45,
+      "invalidate_after_missing_pricing_polls": 3,
+      "invalidate_after_spread_reject_polls": 5,
+      "invalidate_after_midpoint_reject_polls": 5,
+      "max_stop_exit_slippage_cents": 3,
+      "stop_exit_max_reprice_attempts": 0,
+      "stop_exit_timeout_seconds": 2,
+      "allow_stop_exit_reprice": false,
+      "max_target_exit_slippage_cents": 4,
+      "target_exit_max_reprice_attempts": 1,
+      "target_exit_timeout_seconds": 3
     },
     "1h": {
       "spread_filter_cents": 3,
@@ -96,7 +106,17 @@
       "cooldown_after_exit_seconds": 15,
       "max_trades_per_contract": 4,
       "require_signal_reset_before_reentry": true,
-      "signal_reset_score_floor": 45
+      "signal_reset_score_floor": 45,
+      "invalidate_after_missing_pricing_polls": 3,
+      "invalidate_after_spread_reject_polls": 5,
+      "invalidate_after_midpoint_reject_polls": 5,
+      "max_stop_exit_slippage_cents": 4,
+      "stop_exit_max_reprice_attempts": 0,
+      "stop_exit_timeout_seconds": 3,
+      "allow_stop_exit_reprice": false,
+      "max_target_exit_slippage_cents": 5,
+      "target_exit_max_reprice_attempts": 1,
+      "target_exit_timeout_seconds": 4
     }
   }
 }

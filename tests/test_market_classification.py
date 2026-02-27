@@ -236,3 +236,58 @@ def test_resolver_prefers_future_not_within_rollover_buffer(monkeypatch):
     m = asyncio.run(c.resolve_btc_target_market("15m", datetime(2026, 1, 1, 10, 14, 0, tzinfo=timezone.utc)))
     assert m is not None
     assert m.ticker == "NEXT"
+
+
+def test_resolver_strict_rollover_excludes_current_ticker(monkeypatch):
+    c = KalshiClient()
+    c.configure_resolver(btc_15m_series_ticker="KXBTC15M", btc_1h_series_ticker="KXBTC1H", max_delta_15m=3600, max_delta_1h=4200)
+
+    class Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "markets": [
+                    {"ticker": "CURR", "series_ticker": "KXBTC15M", "status": "active", "yes_bid": 49, "yes_ask": 50, "close_time": "2026-01-01T10:15:00Z"},
+                    {"ticker": "NEXT", "series_ticker": "KXBTC15M", "status": "active", "yes_bid": 49, "yes_ask": 50, "close_time": "2026-01-01T10:30:00Z"},
+                ]
+            }
+
+    async def fake_request(method, path, **kwargs):
+        return Resp()
+
+    monkeypatch.setattr(c, "_request", fake_request)
+
+    import asyncio
+
+    m = asyncio.run(c.resolve_btc_target_market("15m", datetime(2026, 1, 1, 10, 14, 0, tzinfo=timezone.utc), current_ticker="CURR", strict_rollover=True))
+    assert m is not None
+    assert m.ticker == "NEXT"
+
+
+def test_resolver_strict_rollover_returns_none_when_no_future_beyond_buffer(monkeypatch):
+    c = KalshiClient()
+    c.configure_resolver(btc_15m_series_ticker="KXBTC15M", btc_1h_series_ticker="KXBTC1H", max_delta_15m=3600, max_delta_1h=4200)
+
+    class Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "markets": [
+                    {"ticker": "CURR", "series_ticker": "KXBTC15M", "status": "active", "yes_bid": 49, "yes_ask": 50, "close_time": "2026-01-01T10:15:00Z"},
+                ]
+            }
+
+    async def fake_request(method, path, **kwargs):
+        return Resp()
+
+    monkeypatch.setattr(c, "_request", fake_request)
+
+    import asyncio
+
+    m = asyncio.run(c.resolve_btc_target_market("15m", datetime(2026, 1, 1, 10, 14, 0, tzinfo=timezone.utc), current_ticker="CURR", strict_rollover=True))
+    assert m is None
+    assert "Strict rollover" in c.last_market_resolution_reason

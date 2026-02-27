@@ -43,6 +43,16 @@ class ModeSettings:
     max_trades_per_contract: int = 3
     require_signal_reset_before_reentry: bool = True
     signal_reset_score_floor: int = 45
+    invalidate_after_missing_pricing_polls: int = 3
+    invalidate_after_spread_reject_polls: int = 5
+    invalidate_after_midpoint_reject_polls: int = 5
+    max_stop_exit_slippage_cents: int = 3
+    stop_exit_max_reprice_attempts: int = 0
+    stop_exit_timeout_seconds: int = 2
+    allow_stop_exit_reprice: bool = False
+    max_target_exit_slippage_cents: int = 4
+    target_exit_max_reprice_attempts: int = 1
+    target_exit_timeout_seconds: int = 3
 
 
 @dataclass

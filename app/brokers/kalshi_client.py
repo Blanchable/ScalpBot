@@ -62,6 +62,13 @@ class Market:
     def ask(self, value: int) -> None:
         self.yes_ask = int(value)
 
+    def refresh_time_fields(self, now_utc: datetime) -> None:
+        if self.close_time is None:
+            self.seconds_to_expiry = 0
+            return
+        # Recompute each loop so expiry gating/rollover never depends on stale cached values.
+        self.seconds_to_expiry = max(0, int((self.close_time - now_utc).total_seconds()))
+
 
 @dataclass
 class OrderResult:
@@ -246,16 +253,33 @@ class KalshiClient:
             raw_status=status,
         )
 
-    def _choose_nearest_market(self, markets: list[Market], target_close: datetime, max_delta_seconds: int, now_utc: datetime, rollover_buffer: int) -> Market | None:
+    def _choose_nearest_market(
+        self,
+        markets: list[Market],
+        target_close: datetime,
+        max_delta_seconds: int,
+        now_utc: datetime,
+        rollover_buffer: int,
+        *,
+        strict_rollover: bool,
+        current_ticker: str | None,
+    ) -> Market | None:
         if not markets:
             return None
-        future = [m for m in markets if m.close_time and m.close_time >= now_utc]
+        future = [m for m in markets if m.close_time and m.close_time > now_utc]
+        if strict_rollover:
+            # Strict rollover must not fall back to the current near-expiry contract.
+            future = [m for m in future if m.seconds_to_expiry > rollover_buffer and (not current_ticker or m.ticker != current_ticker)]
+            if not future:
+                self.last_market_resolution_reason = "Strict rollover: no eligible future contracts beyond rollover buffer"
+                return None
+        else:
+            preferred = [m for m in future if m.seconds_to_expiry > rollover_buffer]
+            future = preferred if preferred else future
         if not future:
             self.last_market_resolution_reason = "No future active contracts available"
             return None
-        preferred = [m for m in future if m.seconds_to_expiry > rollover_buffer]
-        pool = preferred if preferred else future
-        nearest = min(pool, key=lambda m: abs((m.close_time - target_close).total_seconds()) if m.close_time else 10**9)
+        nearest = min(future, key=lambda m: abs((m.close_time - target_close).total_seconds()) if m.close_time else 10**9)
         if nearest.close_time is None:
             return None
         delta = abs((nearest.close_time - target_close).total_seconds())
@@ -266,7 +290,7 @@ class KalshiClient:
             return None
         return nearest
 
-    async def resolve_btc_target_market(self, mode: str, now: datetime | None = None) -> Market | None:
+    async def resolve_btc_target_market(self, mode: str, now: datetime | None = None, *, current_ticker: str | None = None, strict_rollover: bool = False) -> Market | None:
         self.last_market_resolution_reason = ""
         now_utc = (now or utc_now()).astimezone(timezone.utc)
         try:
@@ -304,7 +328,7 @@ class KalshiClient:
 
         active = [m for m in parsed if m.raw_status == "active"]
         rollover_buffer = 90 if mode == "15m" else 300
-        chosen = self._choose_nearest_market(active, target_close, max_delta, now_utc, rollover_buffer)
+        chosen = self._choose_nearest_market(active, target_close, max_delta, now_utc, rollover_buffer, strict_rollover=strict_rollover, current_ticker=current_ticker)
 
         if chosen is None:
             base = (
