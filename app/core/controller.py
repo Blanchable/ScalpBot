@@ -20,7 +20,7 @@ from app.storage.db import connect, init_db
 from app.storage.repositories import TradeRepository, TradeRow
 from app.strategy.contract_selector import validate_market
 from app.strategy.risk_rules import RiskEngine, RiskSnapshot
-from app.strategy.signal_engine import generate_signal
+from app.strategy.signal_engine import Signal, generate_signal
 from app.utils.constants import AppState
 
 logger = logging.getLogger("APP.CONTROLLER")
@@ -35,6 +35,7 @@ class PendingOrderState:
     limit_price_cents: int
     created_at_ts: float
     reprice_attempts: int = 0
+    attempts: int = 1
 
 
 @dataclass
@@ -56,6 +57,10 @@ class PositionState:
     peak_unrealized_pnl_cents: int | None = None
     current_mark_cents: int | None = None
     unrealized_pnl_dollars: float = 0.0
+    entry_spread_cents_at_fill: int = 0
+    polls_since_entry: int = 0
+    stop_hits_in_a_row: int = 0
+    target_hits_in_a_row: int = 0
 
 
 class AppController:
@@ -66,6 +71,7 @@ class AppController:
         self.kalshi = KalshiClient()
         self.feed = BTCReferenceFeed(stale_seconds=settings.global_settings.feed_stale_seconds)
         self._task: asyncio.Task | None = None
+        self._stop_requested = True
         self._running = False
         self._active_strategy_mode = ""
         self._resolved_market: Market | None = None
@@ -75,6 +81,8 @@ class AppController:
         self.active_positions: dict[str, PositionState] = {}
         self._resting_bot_orders: dict[str, dict] = {}
         self._processed_entry_order_ids: set[str] = set()
+        self._stop_requested = False
+        self._ticker_trade_stats: dict[str, dict] = {}
         gs = settings.global_settings
         self.risk = RiskEngine(gs.daily_max_loss, gs.max_consecutive_losses, gs.max_simultaneous_positions)
         self.snapshot = RiskSnapshot()
@@ -133,6 +141,7 @@ class AppController:
         self.invalidate_market_cache("start")
         self._pending_entry = None
         self._pending_exit = None
+        self._stop_requested = False
         self._position = None
         self.active_positions = {}
         self._processed_entry_order_ids.clear()
@@ -271,16 +280,72 @@ class AppController:
         self._trade_repo.add_trade(trade)
         self.emit("status_reason", {"message": f"Trade persisted: ticker={position.ticker} pnl={(position.realized_pnl_cents or 0) / 100.0:.2f}"})
 
-    def _should_exit(self, market: Market, now_ts: float, unrealized_per_contract: int) -> str | None:
+    def _record_contract_exit(self, ticker: str, side: str, score: int, pnl: float, reason: str) -> None:
+        stats = self._ticker_trade_stats.setdefault(ticker, {"trade_count": 0, "last_exit_time": 0.0, "last_exit_reason": "", "last_signal_side": side, "signal_reset": True})
+        stats["trade_count"] += 1
+        stats["last_exit_time"] = time.time()
+        stats["last_exit_reason"] = reason
+        stats["last_signal_side"] = side
+        stats["signal_reset"] = score <= self.settings.mode_settings[self._active_strategy_mode].signal_reset_score_floor
+
+    def _entry_block_reason(self, market_ticker: str, signal: Signal | None = None) -> str | None:
+        cfg = self.settings.mode_settings[self._active_strategy_mode]
+        stats = self._ticker_trade_stats.get(market_ticker)
+        if not stats:
+            return None
+        now_ts = time.time()
+        if now_ts < stats.get("last_exit_time", 0.0) + cfg.cooldown_after_exit_seconds:
+            return "cooldown"
+        if stats.get("last_exit_reason") == "stop_loss" and now_ts < stats.get("last_exit_time", 0.0) + cfg.cooldown_after_loss_seconds:
+            return "loss_cooldown"
+        if stats.get("trade_count", 0) >= cfg.max_trades_per_contract:
+            return "per_contract_cap"
+        if cfg.require_signal_reset_before_reentry:
+            signal_reset = stats.get("signal_reset", True)
+            side_flip = signal is not None and signal.side != "none" and signal.side != stats.get("last_signal_side")
+            if signal is not None and signal.score <= cfg.signal_reset_score_floor:
+                stats["signal_reset"] = True
+                signal_reset = True
+            if not signal_reset and not side_flip:
+                return "signal_not_reset"
+        return None
+
+    def _entry_limit_price(self, market: Market, side: str, mode_cfg: ModeSettings) -> int:
+        if mode_cfg.entry_style != "maker_first":
+            return market.yes_ask if side == "buy_yes" else market.no_ask
+        if side == "buy_yes":
+            maker_price = min(market.yes_bid + mode_cfg.entry_improve_cents, market.yes_ask - 1)
+            return max(1, min(99, maker_price if maker_price >= market.yes_bid else market.yes_ask))
+        maker_price = min(market.no_bid + mode_cfg.entry_improve_cents, market.no_ask - 1)
+        return max(1, min(99, maker_price if maker_price >= market.no_bid else market.no_ask))
+
+    def _should_exit(self, market: Market, now_ts: float, raw_pnl_cents: int) -> str | None:
         assert self._position is not None
         cfg = self.settings.mode_settings[self._active_strategy_mode]
+        # Always flatten before expiry for safety; this can bypass hold/arming windows.
         if market.seconds_to_expiry <= cfg.flatten_before_expiry_seconds:
             return "flatten_before_expiry"
-        if unrealized_per_contract <= -cfg.stop_loss_cents:
+        elapsed = int(now_ts - self._position.opened_at_ts)
+        if elapsed < cfg.stop_activation_seconds or elapsed < cfg.min_hold_seconds:
+            self._position.stop_hits_in_a_row = 0
+            self._position.target_hits_in_a_row = 0
+            return None
+        # Effective stop includes entry spread so spread-cross loss is not treated as adverse move.
+        effective_stop = cfg.stop_loss_cents + self._position.entry_spread_cents_at_fill + cfg.stop_buffer_beyond_spread_cents
+        effective_target = cfg.profit_target_cents + cfg.profit_buffer_beyond_spread_cents
+        if raw_pnl_cents <= -effective_stop:
+            self._position.stop_hits_in_a_row += 1
+        else:
+            self._position.stop_hits_in_a_row = 0
+        if raw_pnl_cents >= effective_target:
+            self._position.target_hits_in_a_row += 1
+        else:
+            self._position.target_hits_in_a_row = 0
+        if self._position.stop_hits_in_a_row >= cfg.exit_confirm_polls:
             return "stop_loss"
-        if unrealized_per_contract >= cfg.profit_target_cents:
+        if self._position.target_hits_in_a_row >= cfg.exit_confirm_polls:
             return "profit_target"
-        if (now_ts - self._position.opened_at_ts) >= cfg.time_stop_seconds:
+        if elapsed >= cfg.time_stop_seconds:
             return "time_stop"
         return None
 
@@ -292,7 +357,7 @@ class AppController:
         self._pending_exit = PendingOrderState(order_id=order.order_id, ticker=market.ticker, side=side, size=self._position.size, limit_price_cents=limit, created_at_ts=time.time())
         self._position.exit_order_id = order.order_id
         self._position.exit_reason = reason
-        self.emit("status_reason", {"message": f"Exit triggered: {reason}, submitted {side} @ {limit}"})
+        self.emit("status_reason", {"message": f"Exit submitted: ticker={market.ticker} side={side} reason={reason} entry={self._position.entry_price_cents} live_bid={limit} order_id={order.order_id}"})
 
     async def _manage_pending_entry(self, market: Market) -> None:
         if self._pending_entry is None:
@@ -327,6 +392,7 @@ class AppController:
                 mode=self._active_strategy_mode,
                 broker_mode=self._broker_mode,
                 entry_time_iso=datetime.now(timezone.utc).isoformat(),
+                entry_spread_cents_at_fill=(market.yes_ask - market.yes_bid) if pos_side == "yes" else (market.no_ask - market.no_bid),
             )
             self.active_positions[self._position_key(self._position.ticker, self._position.side)] = self._position
             self._sync_snapshot_positions()
@@ -341,8 +407,24 @@ class AppController:
             return
         if expired or market.seconds_to_expiry <= self.settings.mode_settings[self._active_strategy_mode].rollover_before_expiry_seconds:
             await self.kalshi.cancel_order(self._pending_entry.order_id)
-            self.emit("status_reason", {"message": f"Entry canceled timeout/rollover: {self._pending_entry.order_id}"})
-            self._pending_entry = None
+            cfg = self.settings.mode_settings[self._active_strategy_mode]
+            if expired and cfg.entry_style == "maker_first" and self._pending_entry.attempts < cfg.max_entry_attempts:
+                # Maker-first requires a controlled escalation instead of always crossing immediately.
+                cross_price = market.yes_ask if self._pending_entry.side == "buy_yes" else market.no_ask
+                refreshed = await self.kalshi.place_limit_order(self._pending_entry.ticker, self._pending_entry.side, self._pending_entry.size, cross_price)
+                self._pending_entry = PendingOrderState(
+                    order_id=refreshed.order_id,
+                    ticker=self._pending_entry.ticker,
+                    side=self._pending_entry.side,
+                    size=self._pending_entry.size,
+                    limit_price_cents=cross_price,
+                    created_at_ts=time.time(),
+                    attempts=self._pending_entry.attempts + 1,
+                )
+                self.emit("status_reason", {"message": f"Entry requoted after maker timeout: {refreshed.order_id} @ {cross_price}"})
+            else:
+                self.emit("status_reason", {"message": f"Entry canceled timeout/rollover: {self._pending_entry.order_id}"})
+                self._pending_entry = None
 
     async def _manage_pending_exit(self, market: Market) -> None:
         if self._pending_exit is None or self._position is None:
@@ -371,6 +453,7 @@ class AppController:
             self.emit("trade", {"ticker": self._position.ticker, "side": self._position.side, "entry": self._position.entry_price_cents, "exit": exit_price, "size": self._position.entry_filled_count, "pnl": realized / 100.0, "reason": self._position.exit_reason or "exit", "hold_time_seconds": hold_s})
             self.session_realized_pnl += realized / 100.0
             self.trade_count += 1
+            self._record_contract_exit(self._position.ticker, f"buy_{self._position.side}", 0, realized / 100.0, self._position.exit_reason or "exit")
             self._persist_closed_trade(self._position, exit_price)
             self.active_positions.pop(self._position_key(self._position.ticker, self._position.side), None)
             self.session_unrealized_pnl = sum(p.unrealized_pnl_dollars for p in self.active_positions.values())
@@ -442,15 +525,19 @@ class AppController:
                 self._position.current_mark_cents = mark
                 self._position.unrealized_pnl_dollars = unrealized / 100.0
                 self.session_unrealized_pnl = sum(p.unrealized_pnl_dollars for p in self.active_positions.values())
-                per_contract = int(unrealized / max(1, self._position.size))
+                raw_pnl_cents = int(unrealized / max(1, self._position.size))
+                self._position.polls_since_entry += 1
                 if self._position.peak_unrealized_pnl_cents is None:
                     self._position.peak_unrealized_pnl_cents = unrealized
                 else:
                     self._position.peak_unrealized_pnl_cents = max(self._position.peak_unrealized_pnl_cents, unrealized)
-                self.emit("status_reason", {"message": f"Position mark: side={self._position.side} mark={mark} unrealized_cents={unrealized}"})
+                cfg = self.settings.mode_settings[self._active_strategy_mode]
+                effective_stop = cfg.stop_loss_cents + self._position.entry_spread_cents_at_fill + cfg.stop_buffer_beyond_spread_cents
+                effective_target = cfg.profit_target_cents + cfg.profit_buffer_beyond_spread_cents
+                self.emit("status_reason", {"message": f"Position mark: ticker={self._position.ticker} side={self._position.side} entry={self._position.entry_price_cents} mark={mark} raw_pnl_cents={raw_pnl_cents} eff_stop={effective_stop} eff_target={effective_target} hold_s={int(time.time()-self._position.opened_at_ts)} stop_hits={self._position.stop_hits_in_a_row} target_hits={self._position.target_hits_in_a_row}"})
                 self.emit("position_mark", {"ticker": self._position.ticker, "side": self._position.side, "entry": self._position.entry_price_cents, "mark": mark, "qty": self._position.size, "unrealized_pnl": self._position.unrealized_pnl_dollars})
                 self.emit("session_metrics", {"session_pnl": self.session_realized_pnl, "session_unrealized_pnl": self.session_unrealized_pnl, "trade_count": self.trade_count, "open_positions": len(self.active_positions)})
-                exit_reason = self._should_exit(market, time.time(), per_contract)
+                exit_reason = self._should_exit(market, time.time(), raw_pnl_cents)
                 if exit_reason:
                     await self._submit_exit_order(market, exit_reason)
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
@@ -458,6 +545,11 @@ class AppController:
 
             if self._pending_entry is not None:
                 await self._manage_pending_entry(market)
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
+            if self._stop_requested or self.state.state == AppState.STOPPING:
+                self.emit("status_reason", {"message": "Stop requested: suppressing new entries"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 
@@ -500,15 +592,31 @@ class AppController:
                 continue
 
             signal = generate_signal(market, tick, mode_cfg, strategy_mode)
+            stats = self._ticker_trade_stats.get(market.ticker)
+            if stats and signal.score <= mode_cfg.signal_reset_score_floor:
+                stats["signal_reset"] = True
             self._emit_market_payload(market, signal.score, signal.side, quote_source, quote_stale)
+            self.emit("status_reason", {"message": f"Signal diagnostics: side={signal.side} yes_edge={signal.yes_edge:.2f} no_edge={signal.no_edge:.2f} threshold={signal.round_trip_threshold:.2f} entry_style={mode_cfg.entry_style} yes={market.yes_bid}/{market.yes_ask} no={market.no_bid}/{market.no_ask}"})
 
             if not signal.should_trade or signal.score < mode_cfg.min_signal_score:
                 self.emit("status_reason", {"message": f"Skipping entry: {signal.reasons[0] if signal.reasons else 'score gate'}"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 
+            block_reason = self._entry_block_reason(market.ticker, signal)
+            if block_reason:
+                msg_map = {"cooldown": "cooldown", "loss_cooldown": "cooldown_after_loss", "per_contract_cap": "per-contract cap", "signal_not_reset": "signal not reset"}
+                self.emit("status_reason", {"message": f"Skipping entry: {msg_map.get(block_reason, block_reason)}"})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
             side = signal.side
-            limit_price = market.yes_ask if side == "buy_yes" else market.no_ask
+            limit_price = self._entry_limit_price(market, side, mode_cfg)
+            if self._stop_requested or self.state.state == AppState.STOPPING:
+                self.emit("status_reason", {"message": "Stop requested: skipped entry submit"})
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
             try:
                 order = await self.kalshi.place_limit_order(market.ticker, side, 1, limit_price)
             except Exception as exc:
@@ -516,7 +624,10 @@ class AppController:
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 
-            self._pending_entry = PendingOrderState(order_id=order.order_id, ticker=market.ticker, side=side, size=1, limit_price_cents=limit_price, created_at_ts=time.time())
+            self._pending_entry = PendingOrderState(order_id=order.order_id, ticker=market.ticker, side=side, size=1, limit_price_cents=limit_price, created_at_ts=time.time(), attempts=1)
+            st = self._ticker_trade_stats.setdefault(market.ticker, {"trade_count": 0, "last_exit_time": 0.0, "last_exit_reason": "", "last_signal_side": side, "signal_reset": True})
+            st["last_signal_side"] = side
+            st["signal_reset"] = False
             if order.order_id:
                 self._resting_bot_orders[order.order_id] = {"ticker": market.ticker, "created_at": time.time(), "side": side}
             self.emit("order", {"ticker": market.ticker, "side": side, "price": limit_price, "status": order.status, "order_id": order.order_id})

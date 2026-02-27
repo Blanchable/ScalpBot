@@ -60,3 +60,13 @@ def test_signal_can_exceed_threshold_in_realistic_case():
     tick = FeedTick(spot=65000, momentum_5s=12, momentum_15s=10, momentum_60s=11, volatility=1.5, updated_at=0, is_stale=False)
     sig = generate_signal(m, tick, mode_settings(), "15m")
     assert sig.score >= mode_settings().min_signal_score
+
+
+def test_signal_blocks_when_edge_below_round_trip_friction():
+    cfg = mode_settings()
+    cfg.min_round_trip_edge_cents = 6
+    m = Market("A", yes_bid=49, yes_ask=50, no_bid=50, no_ask=51, midpoint=49.5, seconds_to_expiry=300)
+    tick = FeedTick(spot=65000, momentum_5s=2.2, momentum_15s=2.1, momentum_60s=2.0, volatility=1.0, updated_at=0, is_stale=False)
+    sig = generate_signal(m, tick, cfg, "15m")
+    assert sig.should_trade is False
+    assert "friction" in " ".join(sig.reasons).lower()

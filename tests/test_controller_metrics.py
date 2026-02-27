@@ -1,10 +1,12 @@
 import asyncio
+import time
 
 from app.brokers.kalshi_client import Market, OrderResult
 from app.config.settings import AppSettings
-from app.core.controller import AppController
+from app.core.controller import AppController, PositionState
 from app.feeds.btc_reference_feed import FeedTick
 from app.strategy.signal_engine import Signal
+from app.utils.constants import AppState
 
 
 def test_controller_emits_session_and_polling_metrics(monkeypatch):
@@ -15,6 +17,7 @@ def test_controller_emits_session_and_polling_metrics(monkeypatch):
 
     settings = AppSettings()
     settings.global_settings.scan_interval_seconds = 0.2
+    settings.mode_settings["1h"].entry_style = "cross_now"
     controller = AppController(settings, emit)
 
     async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
@@ -81,6 +84,7 @@ def test_controller_skips_new_entry_when_open_orders_exist(monkeypatch):
 
     settings = AppSettings()
     settings.global_settings.scan_interval_seconds = 0.2
+    settings.mode_settings["1h"].entry_style = "cross_now"
     controller = AppController(settings, emit)
 
     async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
@@ -137,6 +141,7 @@ def test_controller_uses_no_ask_limit_for_buy_no(monkeypatch):
 
     settings = AppSettings()
     settings.global_settings.scan_interval_seconds = 0.2
+    settings.mode_settings["1h"].entry_style = "cross_now"
     controller = AppController(settings, emit)
 
     async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
@@ -674,6 +679,9 @@ def test_trade_emits_on_close_and_persists(monkeypatch, tmp_path):
     settings.global_settings.scan_interval_seconds = 0.1
     settings.mode_settings["15m"].profit_target_cents = 1
     settings.mode_settings["15m"].flatten_before_expiry_seconds = 1
+    settings.mode_settings["15m"].stop_activation_seconds = 0
+    settings.mode_settings["15m"].min_hold_seconds = 0
+    settings.mode_settings["15m"].exit_confirm_polls = 1
     controller = AppController(settings, emit)
 
     async def fake_connect(*args, **kwargs):
@@ -804,3 +812,189 @@ def test_idempotent_executed_poll_does_not_duplicate_position(monkeypatch, tmp_p
     opened = [p for k, p in events if k == "position_opened"]
     assert len(opened) == 1
     assert len(controller.active_positions) == 1
+
+
+def test_stop_not_armed_during_activation_window():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    cfg = settings.mode_settings["15m"]
+    cfg.stop_activation_seconds = 10
+    cfg.min_hold_seconds = 10
+    controller._position = PositionState(
+        ticker="T",
+        side="yes",
+        entry_price_cents=60,
+        size=1,
+        opened_at_ts=time.time(),
+        entry_order_id="e",
+        entry_filled_count=1,
+        is_open=True,
+        entry_spread_cents_at_fill=2,
+    )
+    reason = controller._should_exit(Market("T", 56, 58, 42, 44, 57, 300), time.time(), -4)
+    assert reason is None
+
+
+def test_stop_requires_consecutive_confirm_polls():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    cfg = settings.mode_settings["15m"]
+    cfg.stop_activation_seconds = 0
+    cfg.min_hold_seconds = 0
+    cfg.exit_confirm_polls = 2
+    controller._position = PositionState(
+        ticker="T", side="yes", entry_price_cents=60, size=1, opened_at_ts=time.time()-20,
+        entry_order_id="e", entry_filled_count=1, is_open=True, entry_spread_cents_at_fill=1,
+    )
+    assert controller._should_exit(Market("T", 55, 57, 43, 45, 56, 300), time.time(), -5) is None
+    assert controller._should_exit(Market("T", 55, 57, 43, 45, 56, 300), time.time(), -5) == "stop_loss"
+
+
+def test_profit_target_requires_consecutive_confirm_polls():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    cfg = settings.mode_settings["15m"]
+    cfg.stop_activation_seconds = 0
+    cfg.min_hold_seconds = 0
+    cfg.exit_confirm_polls = 2
+    controller._position = PositionState(
+        ticker="T", side="yes", entry_price_cents=50, size=1, opened_at_ts=time.time()-20,
+        entry_order_id="e", entry_filled_count=1, is_open=True, entry_spread_cents_at_fill=1,
+    )
+    assert controller._should_exit(Market("T", 54, 55, 45, 46, 54.5, 300), time.time(), 4) is None
+    assert controller._should_exit(Market("T", 54, 55, 45, 46, 54.5, 300), time.time(), 4) == "profit_target"
+
+
+def test_entry_blocked_during_cooldown_and_loss_cooldown():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    cfg = settings.mode_settings["15m"]
+    cfg.cooldown_after_exit_seconds = 100
+    cfg.cooldown_after_loss_seconds = 200
+    controller._ticker_trade_stats["T"] = {
+        "trade_count": 1,
+        "last_exit_time": time.time(),
+        "last_exit_reason": "stop_loss",
+        "last_signal_side": "buy_yes",
+        "signal_reset": True,
+    }
+    assert controller._entry_block_reason("T") == "cooldown"
+    controller._ticker_trade_stats["T"]["last_exit_time"] = time.time() - 110
+    assert controller._entry_block_reason("T") == "loss_cooldown"
+
+
+def test_entry_blocked_by_per_contract_cap_and_signal_reset():
+    settings = AppSettings()
+    controller = AppController(settings, lambda *_: None)
+    controller._active_strategy_mode = "15m"
+    cfg = settings.mode_settings["15m"]
+    cfg.max_trades_per_contract = 1
+    controller._ticker_trade_stats["T"] = {
+        "trade_count": 1,
+        "last_exit_time": time.time() - 1000,
+        "last_exit_reason": "profit_target",
+        "last_signal_side": "buy_yes",
+        "signal_reset": False,
+    }
+    assert controller._entry_block_reason("T") == "per_contract_cap"
+    controller._ticker_trade_stats["T"]["trade_count"] = 0
+    sig = Signal(score=70, edge_cents=6, side="buy_yes", should_trade=True, limit_price=55, fair_yes=60)
+    assert controller._entry_block_reason("T", sig) == "signal_not_reset"
+
+
+def test_no_new_entry_after_stopping(monkeypatch):
+    events = []
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    controller = AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=9, momentum_15s=8, momentum_60s=7, volatility=1, updated_at=1, is_stale=False)
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=52, yes_ask=53, no_bid=47, no_ask=48, midpoint=52, seconds_to_expiry=500)
+    async def fake_orderbook(ticker: str):
+        return {"best_yes_bid": 52, "best_yes_ask": 53, "best_no_bid": 47, "best_no_ask": 48}
+    async def fake_open_orders(*args, **kwargs):
+        return []
+    called={"n":0, "after_stop":0}
+    async def fake_place(*args, **kwargs):
+        called["n"] += 1
+        if controller._stop_requested:
+            called["after_stop"] += 1
+        return OrderResult(order_id="x", status="submitted", fill_price=None)
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place)
+
+    async def run():
+        await controller.start("ABCD", "sec", "paper", "15m")
+        await asyncio.sleep(0.05)
+        controller._stop_requested = True
+        await asyncio.sleep(0.25)
+        await controller.stop()
+
+    asyncio.run(run())
+    assert called["after_stop"] == 0
+
+
+def test_maker_first_entry_uses_bid_improved_limit(monkeypatch):
+    events=[]
+    def emit(k,p): events.append((k,p))
+    settings=AppSettings()
+    settings.global_settings.scan_interval_seconds=0.2
+    settings.mode_settings["15m"].entry_style = "maker_first"
+    settings.mode_settings["15m"].entry_improve_cents = 0
+    controller=AppController(settings, emit)
+
+    async def fake_connect(*args, **kwargs):
+        controller.kalshi.connected=True
+        controller.kalshi.connection_verified=True
+        return True
+    async def fake_summary():
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=9, momentum_15s=8, momentum_60s=7, volatility=1, updated_at=1, is_stale=False)
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="T", yes_bid=52, yes_ask=54, no_bid=46, no_ask=48, midpoint=53, seconds_to_expiry=500)
+    async def fake_orderbook(ticker: str):
+        return {"best_yes_bid": 52, "best_yes_ask": 54, "best_no_bid": 46, "best_no_ask": 48}
+    async def fake_open_orders(*args, **kwargs):
+        return []
+    placed={"price":None}
+    async def fake_place(ticker, side, qty, limit_price):
+        placed["price"] = limit_price
+        return OrderResult(order_id="e1", status="submitted", fill_price=None)
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+    monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place)
+    monkeypatch.setattr("app.core.controller.generate_signal", lambda *args, **kwargs: Signal(score=99, edge_cents=8.0, side="buy_yes", should_trade=True, limit_price=54, fair_yes=62.0, reasons=[]))
+
+    async def run():
+        await controller.start("ABCD", "sec", "paper", "15m")
+        await asyncio.sleep(0.35)
+        await controller.stop()
+
+    asyncio.run(run())
+    assert placed["price"] == 52

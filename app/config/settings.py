@@ -26,6 +26,23 @@ class ModeSettings:
     entry_order_timeout_seconds: int = 10
     exit_order_timeout_seconds: int = 8
     max_exit_reprice_attempts: int = 1
+    stop_activation_seconds: int = 3
+    min_hold_seconds: int = 4
+    exit_confirm_polls: int = 2
+    stop_buffer_beyond_spread_cents: int = 1
+    profit_buffer_beyond_spread_cents: int = 0
+    min_round_trip_edge_cents: int = 4
+    require_edge_multiple_of_spread: bool = True
+    spread_edge_multiplier: float = 1.5
+    max_entry_price_deviation_from_mark_cents: int = 2
+    entry_style: str = "maker_first"
+    entry_improve_cents: int = 0
+    entry_requote_seconds: int = 2
+    max_entry_attempts: int = 2
+    cooldown_after_exit_seconds: int = 8
+    max_trades_per_contract: int = 3
+    require_signal_reset_before_reentry: bool = True
+    signal_reset_score_floor: int = 45
 
 
 @dataclass
