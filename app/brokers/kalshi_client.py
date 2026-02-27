@@ -96,6 +96,7 @@ class KalshiClient:
         self.btc_1h_series_ticker = BTC_1H_SERIES_TICKER
         self.resolver_max_delta_seconds_15m = DEFAULT_RESOLVER_MAX_DELTA_SECONDS_15M
         self.resolver_max_delta_seconds_1h = DEFAULT_RESOLVER_MAX_DELTA_SECONDS_1H
+        self._discovered_1h_series: str = ""
 
     def configure_resolver(self, *, btc_15m_series_ticker: str, btc_1h_series_ticker: str, max_delta_15m: int, max_delta_1h: int) -> None:
         self.btc_15m_series_ticker = (btc_15m_series_ticker or BTC_15M_SERIES_TICKER).strip()
@@ -186,6 +187,39 @@ class KalshiClient:
             if not cursor:
                 break
         return all_markets[:MAX_MARKET_SCAN_ITEMS]
+
+    async def _fetch_open_markets(self, *, status: str = "open", limit: int = 1000) -> list[dict]:
+        all_markets: list[dict] = []
+        cursor: str | None = None
+        while len(all_markets) < MAX_MARKET_SCAN_ITEMS:
+            params: dict[str, Any] = {"status": status, "limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._request("GET", f"{self.REST_PREFIX}/markets", params=params, auth=False)
+            response.raise_for_status()
+            payload = response.json()
+            markets = payload.get("markets", [])
+            if isinstance(markets, list):
+                all_markets.extend(markets)
+            cursor = payload.get("cursor")
+            if not cursor:
+                break
+        return all_markets[:MAX_MARKET_SCAN_ITEMS]
+
+    def _discover_1h_candidates(self, items: list[dict], now_utc: datetime) -> list[dict]:
+        candidates: list[dict] = []
+        for item in items:
+            text = f"{item.get('ticker','')} {item.get('title','')} {item.get('series_ticker','')}".upper()
+            if "BTC" not in text:
+                continue
+            close_dt = parse_api_datetime(str(item.get("close_time", "")))
+            if close_dt is None or close_dt <= now_utc:
+                continue
+            # Prefer contracts closing on top-of-hour boundaries for hourly mode fallback discovery.
+            if close_dt.minute != 0:
+                continue
+            candidates.append(item)
+        return candidates
 
     @staticmethod
     def _to_cents(value: Any) -> int | None:
@@ -307,6 +341,20 @@ class KalshiClient:
         max_delta = self._max_delta_for_mode(mode)
 
         items = await self._fetch_series_open_markets(series_ticker)
+        if mode == "1h" and not items and self._discovered_1h_series and self._discovered_1h_series != series_ticker:
+            items = await self._fetch_series_open_markets(self._discovered_1h_series)
+            if items:
+                series_ticker = self._discovered_1h_series
+        if mode == "1h" and not items:
+            fallback_items = await self._fetch_open_markets(status="open", limit=1000)
+            discovered = self._discover_1h_candidates(fallback_items, now_utc)
+            if discovered:
+                series_guess = str(discovered[0].get("series_ticker", "")).strip()
+                if series_guess:
+                    self._discovered_1h_series = series_guess
+                    series_ticker = series_guess
+                    logger.info("1h resolver fallback discovered series/event: %s", series_guess)
+                items = discovered
         parsed: list[Market] = []
         statuses: dict[str, int] = {}
         missing_close = 0
@@ -332,7 +380,7 @@ class KalshiClient:
 
         if chosen is None:
             base = (
-                f"Resolver miss mode={mode} series={series_ticker} target={target_close.isoformat()} "
+                f"Resolver miss mode={mode} series={series_ticker or self._discovered_1h_series} target={target_close.isoformat()} "
                 f"returned={len(items)} parsed={len(parsed)} active={len(active)} "
                 f"statuses={statuses} missing_close={missing_close} unpriced={unpriced} sample={ticker_samples}"
             )

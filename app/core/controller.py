@@ -65,6 +65,14 @@ class PositionState:
     polls_since_entry: int = 0
     stop_hits_in_a_row: int = 0
     target_hits_in_a_row: int = 0
+    best_mark_cents: int = 0
+    worst_mark_cents: int = 0
+    trail_armed: bool = False
+    moved_to_breakeven: bool = False
+    adverse_fill_window_end_ts: float = 0.0
+    target_ready_ts: float = 0.0
+    stop_ready_ts: float = 0.0
+    breakeven_floor_cents: int = 0
 
 
 class AppController:
@@ -89,6 +97,7 @@ class AppController:
         self._current_contract_ticker: str = ""
         self._invalid_market_counts = {"missing_pricing": 0, "spread": 0, "midpoint": 0}
         self._skip_repeat = {"ticker": "", "reason": "", "count": 0}
+        self._resolver_repeat = {"msg": "", "count": 0}
         gs = settings.global_settings
         self.risk = RiskEngine(gs.daily_max_loss, gs.max_consecutive_losses, gs.max_simultaneous_positions)
         self.snapshot = RiskSnapshot()
@@ -131,6 +140,15 @@ class AppController:
         else:
             self._skip_repeat = {"ticker": ticker, "reason": reason, "count": 1}
         self.emit("status_reason", {"message": f"{source}: ticker={ticker} reason={reason} (x{self._skip_repeat['count']})"})
+
+    def _emit_resolver_reason(self, message: str) -> None:
+        if message == self._resolver_repeat["msg"]:
+            self._resolver_repeat["count"] += 1
+            if self._resolver_repeat["count"] % 10 != 0:
+                return
+        else:
+            self._resolver_repeat = {"msg": message, "count": 1}
+        self.emit("status_reason", {"message": message})
 
     def _reset_market_invalid_counts(self) -> None:
         self._invalid_market_counts = {"missing_pricing": 0, "spread": 0, "midpoint": 0}
@@ -295,7 +313,7 @@ class AppController:
                 self._resolved_market = await self.kalshi.resolve_btc_target_market(strategy_mode, now_utc)
             self.polling_counts["market"] += 1
             if self._resolved_market:
-                self.emit("status_reason", {"message": self.kalshi.last_market_resolution_reason})
+                self._emit_resolver_reason(self.kalshi.last_market_resolution_reason)
                 if self._current_contract_ticker and self._current_contract_ticker != self._resolved_market.ticker:
                     self.emit("status_reason", {"message": f"Rollover complete: {self._current_contract_ticker} -> {self._resolved_market.ticker}"})
                     self._reset_market_invalid_counts()
@@ -354,6 +372,7 @@ class AppController:
         stats["last_exit_reason"] = reason
         stats["last_signal_side"] = side
         stats["signal_reset"] = score <= self.settings.mode_settings[self._active_strategy_mode].signal_reset_score_floor
+        stats["neutral_until"] = time.time() + self.settings.mode_settings[self._active_strategy_mode].neutral_reset_seconds_after_loss if reason == "stop_loss" else 0.0
 
     def _entry_block_reason(self, market_ticker: str, signal: Signal | None = None) -> str | None:
         cfg = self.settings.mode_settings[self._active_strategy_mode]
@@ -367,6 +386,10 @@ class AppController:
             return "loss_cooldown"
         if stats.get("trade_count", 0) >= cfg.max_trades_per_contract:
             return "per_contract_cap"
+        if stats.get("last_exit_reason") == "stop_loss" and now_ts < stats.get("neutral_until", 0.0):
+            side_flip = signal is not None and signal.side != "none" and signal.side != stats.get("last_signal_side")
+            if not side_flip and not stats.get("signal_reset", False):
+                return "neutral_reset_after_loss"
         if cfg.require_signal_reset_before_reentry:
             signal_reset = stats.get("signal_reset", True)
             side_flip = signal is not None and signal.side != "none" and signal.side != stats.get("last_signal_side")
@@ -389,14 +412,61 @@ class AppController:
     def _should_exit(self, market: Market, now_ts: float, raw_pnl_cents: int) -> str | None:
         assert self._position is not None
         cfg = self.settings.mode_settings[self._active_strategy_mode]
-        # Always flatten before expiry for safety; this can bypass hold/arming windows.
         if market.seconds_to_expiry <= cfg.flatten_before_expiry_seconds:
             return "flatten_before_expiry"
+
         elapsed = int(now_ts - self._position.opened_at_ts)
-        if elapsed < cfg.stop_activation_seconds or elapsed < cfg.min_hold_seconds:
-            self._position.stop_hits_in_a_row = 0
-            self._position.target_hits_in_a_row = 0
-            return None
+        if now_ts <= self._position.adverse_fill_window_end_ts and raw_pnl_cents <= -cfg.adverse_fill_max_loss_cents:
+            return "adverse_fill"
+
+        target_armed = elapsed >= cfg.target_activation_seconds
+        stop_armed = elapsed >= cfg.stop_activation_seconds and elapsed >= cfg.min_hold_seconds
+        if target_armed and self._position.target_ready_ts == 0:
+            self._position.target_ready_ts = now_ts
+            self.emit("status_reason", {"message": f"exit_manager: target armed for {self._position.ticker}"})
+        if stop_armed and self._position.stop_ready_ts == 0:
+            self._position.stop_ready_ts = now_ts
+            self.emit("status_reason", {"message": f"exit_manager: stop armed for {self._position.ticker}"})
+
+        effective_stop = cfg.stop_loss_cents + self._position.entry_spread_cents_at_fill + cfg.stop_buffer_beyond_spread_cents
+        effective_target = cfg.profit_target_cents + cfg.profit_buffer_beyond_spread_cents
+        mark = market.yes_bid if self._position.side == "yes" else market.no_bid
+        self._position.best_mark_cents = max(self._position.best_mark_cents, mark)
+        self._position.worst_mark_cents = min(self._position.worst_mark_cents, mark)
+
+        if cfg.enable_trailing_winners:
+            if not self._position.moved_to_breakeven and raw_pnl_cents >= cfg.breakeven_trigger_cents:
+                self._position.moved_to_breakeven = True
+                self._position.breakeven_floor_cents = self._position.entry_price_cents + cfg.breakeven_lock_cents
+                self.emit("status_reason", {"message": f"exit_manager: breakeven flip on {self._position.ticker} floor={self._position.breakeven_floor_cents}"})
+            if self._position.moved_to_breakeven and mark <= self._position.breakeven_floor_cents:
+                return "breakeven_stop"
+            if not self._position.trail_armed and raw_pnl_cents >= cfg.trail_arm_cents:
+                self._position.trail_armed = True
+                self.emit("status_reason", {"message": f"exit_manager: trailing armed for {self._position.ticker}"})
+            if cfg.hard_take_profit_cents > 0 and raw_pnl_cents >= cfg.hard_take_profit_cents:
+                return "hard_take_profit"
+            if self._position.trail_armed and (self._position.best_mark_cents - mark) >= cfg.trail_distance_cents:
+                return "trailing_stop"
+        elif target_armed:
+            if raw_pnl_cents >= effective_target:
+                self._position.target_hits_in_a_row += 1
+            else:
+                self._position.target_hits_in_a_row = 0
+            if self._position.target_hits_in_a_row >= cfg.exit_confirm_polls_target:
+                return "profit_target"
+
+        if stop_armed:
+            if raw_pnl_cents <= -effective_stop:
+                self._position.stop_hits_in_a_row += 1
+            else:
+                self._position.stop_hits_in_a_row = 0
+            if self._position.stop_hits_in_a_row >= cfg.exit_confirm_polls_stop:
+                return "stop_loss"
+
+        if elapsed >= cfg.time_stop_seconds:
+            return "time_stop"
+        return None
         # Effective stop includes entry spread so spread-cross loss is not treated as adverse move.
         effective_stop = cfg.stop_loss_cents + self._position.entry_spread_cents_at_fill + cfg.stop_buffer_beyond_spread_cents
         effective_target = cfg.profit_target_cents + cfg.profit_buffer_beyond_spread_cents
@@ -425,8 +495,8 @@ class AppController:
         side = "sell_yes" if self._position.side == "yes" else "sell_no"
         limit = market.yes_bid if self._position.side == "yes" else market.no_bid
         cfg = self.settings.mode_settings[self._active_strategy_mode]
-        stop_like = reason == "stop_loss"
-        target_like = reason == "profit_target"
+        stop_like = reason in {"stop_loss", "adverse_fill"}
+        target_like = reason in {"profit_target", "trailing_stop", "breakeven_stop", "hard_take_profit"}
         slippage_cap = cfg.max_stop_exit_slippage_cents if stop_like else cfg.max_target_exit_slippage_cents
         trigger_mark = limit
         min_allowed = max(1, trigger_mark - slippage_cap)
@@ -480,6 +550,9 @@ class AppController:
                 broker_mode=self._broker_mode,
                 entry_time_iso=datetime.now(timezone.utc).isoformat(),
                 entry_spread_cents_at_fill=(market.yes_ask - market.yes_bid) if pos_side == "yes" else (market.no_ask - market.no_bid),
+                best_mark_cents=market.yes_bid if pos_side == "yes" else market.no_bid,
+                worst_mark_cents=market.yes_bid if pos_side == "yes" else market.no_bid,
+                adverse_fill_window_end_ts=time.time() + self.settings.mode_settings[self._active_strategy_mode].adverse_fill_guard_seconds,
             )
             self.active_positions[self._position_key(self._position.ticker, self._position.side)] = self._position
             self._sync_snapshot_positions()
@@ -496,19 +569,39 @@ class AppController:
             await self.kalshi.cancel_order(self._pending_entry.order_id)
             cfg = self.settings.mode_settings[self._active_strategy_mode]
             if expired and cfg.entry_style == "maker_first" and self._pending_entry.attempts < cfg.max_entry_attempts:
-                # Maker-first requires a controlled escalation instead of always crossing immediately.
+                allow_requote = True
+                revalidate_reason = ""
                 cross_price = market.yes_ask if self._pending_entry.side == "buy_yes" else market.no_ask
-                refreshed = await self.kalshi.place_limit_order(self._pending_entry.ticker, self._pending_entry.side, self._pending_entry.size, cross_price)
-                self._pending_entry = PendingOrderState(
-                    order_id=refreshed.order_id,
-                    ticker=self._pending_entry.ticker,
-                    side=self._pending_entry.side,
-                    size=self._pending_entry.size,
-                    limit_price_cents=cross_price,
-                    created_at_ts=time.time(),
-                    attempts=self._pending_entry.attempts + 1,
-                )
-                self.emit("status_reason", {"message": f"Entry requoted after maker timeout: {refreshed.order_id} @ {cross_price}"})
+                drift = cross_price - self._pending_entry.limit_price_cents
+                signal = None
+                if cfg.require_signal_revalidation_on_requote:
+                    tick = await self.feed.get_tick()
+                    signal = generate_signal(market, tick, cfg, self._active_strategy_mode)
+                    if tick.is_stale or not signal.should_trade or signal.side != self._pending_entry.side or signal.score < cfg.min_signal_score:
+                        allow_requote = False
+                        revalidate_reason = "stale signal on maker timeout"
+                    elif signal.edge_cents < signal.round_trip_threshold:
+                        allow_requote = False
+                        revalidate_reason = "edge no longer clears friction"
+                if drift > cfg.max_requote_drift_cents:
+                    allow_requote = False
+                    revalidate_reason = "price drift exceeded requote cap"
+                self.emit("status_reason", {"message": f"entry_requote: old={self._pending_entry.limit_price_cents} new={cross_price} drift={drift} side={self._pending_entry.side} score={(signal.score if signal else 'na')} edge={(signal.edge_cents if signal else 'na')} allowed={allow_requote}"})
+                if allow_requote:
+                    refreshed = await self.kalshi.place_limit_order(self._pending_entry.ticker, self._pending_entry.side, self._pending_entry.size, cross_price)
+                    self._pending_entry = PendingOrderState(
+                        order_id=refreshed.order_id,
+                        ticker=self._pending_entry.ticker,
+                        side=self._pending_entry.side,
+                        size=self._pending_entry.size,
+                        limit_price_cents=cross_price,
+                        created_at_ts=time.time(),
+                        attempts=self._pending_entry.attempts + 1,
+                    )
+                    self.emit("status_reason", {"message": f"Entry requoted after maker timeout: {refreshed.order_id} @ {cross_price}"})
+                else:
+                    self.emit("status_reason", {"message": f"Entry canceled: {revalidate_reason or 'stale signal on maker timeout'}"})
+                    self._pending_entry = None
             else:
                 self.emit("status_reason", {"message": f"Entry canceled timeout/rollover: {self._pending_entry.order_id}"})
                 self._pending_entry = None
@@ -552,7 +645,9 @@ class AppController:
 
         cfg = self.settings.mode_settings[self._active_strategy_mode]
         reason = self._pending_exit.exit_reason or "exit"
-        timeout = cfg.stop_exit_timeout_seconds if reason == "stop_loss" else (cfg.target_exit_timeout_seconds if reason == "profit_target" else cfg.exit_order_timeout_seconds)
+        stop_like = reason in {"stop_loss", "adverse_fill"}
+        target_like = reason in {"profit_target", "trailing_stop", "breakeven_stop", "hard_take_profit"}
+        timeout = cfg.stop_exit_timeout_seconds if stop_like else (cfg.target_exit_timeout_seconds if target_like else cfg.exit_order_timeout_seconds)
         if (time.time() - self._pending_exit.created_at_ts) > timeout:
             await self.kalshi.cancel_order(self._pending_exit.order_id)
             current_bid = market.yes_bid if self._position.side == "yes" else market.no_bid
@@ -561,12 +656,12 @@ class AppController:
                 self.emit("status_reason", {"message": f"exit_manager: repricing blocked by slippage cap reason={reason} trigger={self._pending_exit.trigger_mark_cents} min_allowed={self._pending_exit.min_allowed_exit_cents} current_bid={current_bid}"})
                 self._pending_exit.created_at_ts = time.time()
                 return
-            if reason == "stop_loss" and not cfg.allow_stop_exit_reprice:
+            if stop_like and not cfg.allow_stop_exit_reprice:
                 self.emit("status_reason", {"message": f"exit_manager: stop reprice suppressed at cap; submitting guarded flatten @ {current_bid}"})
                 self._pending_exit = None
                 await self._submit_exit_order(market, reason)
                 return
-            max_reprices = cfg.stop_exit_max_reprice_attempts if reason == "stop_loss" else (cfg.target_exit_max_reprice_attempts if reason == "profit_target" else cfg.max_exit_reprice_attempts)
+            max_reprices = cfg.stop_exit_max_reprice_attempts if stop_like else (cfg.target_exit_max_reprice_attempts if target_like else cfg.max_exit_reprice_attempts)
             if self._pending_exit.reprice_attempts < max_reprices:
                 self._pending_exit.reprice_attempts += 1
                 self._pending_exit = None
@@ -597,7 +692,7 @@ class AppController:
                 continue
 
             if market is None:
-                self.emit("status_reason", {"message": self.kalshi.last_market_resolution_reason or f"No active BTC {strategy_mode} target market"})
+                self._emit_resolver_reason(self.kalshi.last_market_resolution_reason or f"No active BTC {strategy_mode} target market")
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
             if not self._refresh_market_time(market, now_utc):
@@ -722,7 +817,7 @@ class AppController:
 
             block_reason = self._entry_block_reason(market.ticker, signal)
             if block_reason:
-                msg_map = {"cooldown": "cooldown", "loss_cooldown": "cooldown_after_loss", "per_contract_cap": "per-contract cap", "signal_not_reset": "signal not reset"}
+                msg_map = {"cooldown": "cooldown", "loss_cooldown": "cooldown_after_loss", "neutral_reset_after_loss": "neutral reset after loss", "per_contract_cap": "per-contract cap", "signal_not_reset": "signal not reset"}
                 self.emit("status_reason", {"message": f"Skipping entry: {msg_map.get(block_reason, block_reason)}"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue

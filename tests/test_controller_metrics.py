@@ -683,6 +683,8 @@ def test_trade_emits_on_close_and_persists(monkeypatch, tmp_path):
     settings.mode_settings["15m"].stop_activation_seconds = 0
     settings.mode_settings["15m"].min_hold_seconds = 0
     settings.mode_settings["15m"].exit_confirm_polls = 1
+    settings.mode_settings["15m"].enable_trailing_winners = False
+    settings.mode_settings["15m"].target_activation_seconds = 0
     controller = AppController(settings, emit)
 
     async def fake_connect(*args, **kwargs):
@@ -845,6 +847,8 @@ def test_stop_requires_consecutive_confirm_polls():
     cfg.stop_activation_seconds = 0
     cfg.min_hold_seconds = 0
     cfg.exit_confirm_polls = 2
+    cfg.exit_confirm_polls_target = 2
+    cfg.enable_trailing_winners = False
     controller._position = PositionState(
         ticker="T", side="yes", entry_price_cents=60, size=1, opened_at_ts=time.time()-20,
         entry_order_id="e", entry_filled_count=1, is_open=True, entry_spread_cents_at_fill=1,
@@ -861,6 +865,8 @@ def test_profit_target_requires_consecutive_confirm_polls():
     cfg.stop_activation_seconds = 0
     cfg.min_hold_seconds = 0
     cfg.exit_confirm_polls = 2
+    cfg.exit_confirm_polls_target = 2
+    cfg.enable_trailing_winners = False
     controller._position = PositionState(
         ticker="T", side="yes", entry_price_cents=50, size=1, opened_at_ts=time.time()-20,
         entry_order_id="e", entry_filled_count=1, is_open=True, entry_spread_cents_at_fill=1,
