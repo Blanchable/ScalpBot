@@ -42,6 +42,9 @@ DEFAULT_MODE_SETTINGS = {
         "min_signal_score": 65,
         "resolver_soft_spread_cents": 6,
         "rollover_before_expiry_seconds": 90,
+        "entry_order_timeout_seconds": 10,
+        "exit_order_timeout_seconds": 8,
+        "max_exit_reprice_attempts": 1,
     },
     "1h": {
         "spread_filter_cents": 3,
@@ -59,5 +62,8 @@ DEFAULT_MODE_SETTINGS = {
         "min_signal_score": 65,
         "resolver_soft_spread_cents": 8,
         "rollover_before_expiry_seconds": 300,
+        "entry_order_timeout_seconds": 20,
+        "exit_order_timeout_seconds": 10,
+        "max_exit_reprice_attempts": 2,
     },
 }

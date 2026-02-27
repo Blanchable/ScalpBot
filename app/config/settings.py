@@ -23,6 +23,9 @@ class ModeSettings:
     min_signal_score: int
     resolver_soft_spread_cents: int = 6
     rollover_before_expiry_seconds: int = 90
+    entry_order_timeout_seconds: int = 10
+    exit_order_timeout_seconds: int = 8
+    max_exit_reprice_attempts: int = 1
 
 
 @dataclass

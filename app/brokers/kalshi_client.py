@@ -401,10 +401,36 @@ class KalshiClient:
             return False
         return True
 
+
+    async def get_order_status(self, order_id: str) -> dict:
+        response = await self._request("GET", f"{self.REST_PREFIX}/portfolio/orders/{order_id}", auth=True)
+        response.raise_for_status()
+        body = response.json()
+        order = body.get("order", body)
+        filled_count = int(order.get("filled_count", 0) or 0)
+        total_count = int(order.get("count", 0) or 0)
+        remaining_count = int(order.get("remaining_count", max(0, total_count - filled_count)) or 0)
+        return {
+            "order_id": str(order.get("order_id", order_id)),
+            "status": str(order.get("status", "unknown")),
+            "action": str(order.get("action", "")),
+            "side": str(order.get("side", "")),
+            "ticker": str(order.get("ticker", "")),
+            "count": total_count,
+            "remaining_count": remaining_count,
+            "filled_count": filled_count,
+            "yes_price": order.get("yes_price"),
+            "no_price": order.get("no_price"),
+            "created_time": order.get("created_time"),
+            "updated_time": order.get("updated_time"),
+        }
+
     async def place_limit_order(self, market_ticker: str, signal_side: str, qty: int, limit_price: float) -> OrderResult:
         mapping = {
             "buy_yes": ("buy", "yes", "yes_price"),
             "buy_no": ("buy", "no", "no_price"),
+            "sell_yes": ("sell", "yes", "yes_price"),
+            "sell_no": ("sell", "no", "no_price"),
         }
         if signal_side not in mapping:
             raise ValueError(f"Unsupported signal side: {signal_side}")
