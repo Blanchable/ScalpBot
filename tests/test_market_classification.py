@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 
-from app.brokers.kalshi_client import BTC_15M_SERIES_TICKER, BTC_1H_SERIES_TICKER, KalshiClient
+from app.brokers.kalshi_client import KalshiClient
 
 
-def test_15m_boundary_resolution_and_nearest_contract(monkeypatch):
+def test_15m_resolver_selects_nearest_next_quarter(monkeypatch):
     c = KalshiClient()
-    captured = {}
+    c.configure_resolver(btc_15m_series_ticker="KXBTC15M", btc_1h_series_ticker="KXBTC1H", max_delta_15m=1200, max_delta_1h=4200)
 
     class Resp:
         def raise_for_status(self):
@@ -16,39 +16,38 @@ def test_15m_boundary_resolution_and_nearest_contract(monkeypatch):
                 "markets": [
                     {
                         "ticker": "KXBTC15M-1015",
-                        "series_ticker": BTC_15M_SERIES_TICKER,
+                        "series_ticker": "KXBTC15M",
+                        "status": "active",
                         "yes_bid": 48,
                         "yes_ask": 50,
-                        "open": True,
                         "close_time": "2026-01-01T10:15:00Z",
                     },
                     {
                         "ticker": "KXBTC15M-1030",
-                        "series_ticker": BTC_15M_SERIES_TICKER,
-                        "yes_bid": 49,
-                        "yes_ask": 51,
-                        "open": True,
+                        "series_ticker": "KXBTC15M",
+                        "status": "active",
+                        "yes_bid": 48,
+                        "yes_ask": 52,
                         "close_time": "2026-01-01T10:30:00Z",
                     },
                 ]
             }
 
     async def fake_request(method, path, **kwargs):
-        captured["params"] = kwargs.get("params", {})
         return Resp()
 
     monkeypatch.setattr(c, "_request", fake_request)
 
     import asyncio
 
-    market = asyncio.run(c.resolve_active_btc_market("15m", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
-    assert market is not None
-    assert market.ticker == "KXBTC15M-1015"
-    assert captured["params"]["series_ticker"] == BTC_15M_SERIES_TICKER
+    m = asyncio.run(c.resolve_btc_target_market("15m", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
+    assert m is not None
+    assert m.ticker == "KXBTC15M-1015"
 
 
-def test_15m_rollover_selects_next_interval(monkeypatch):
+def test_resolver_ignores_inactive_and_not_literal_open(monkeypatch):
     c = KalshiClient()
+    c.configure_resolver(btc_15m_series_ticker="KXBTC15M", btc_1h_series_ticker="KXBTC1H", max_delta_15m=1200, max_delta_1h=4200)
 
     class Resp:
         def raise_for_status(self):
@@ -58,11 +57,53 @@ def test_15m_rollover_selects_next_interval(monkeypatch):
             return {
                 "markets": [
                     {
-                        "ticker": "KXBTC15M-1030",
-                        "series_ticker": BTC_15M_SERIES_TICKER,
+                        "ticker": "OLD",
+                        "series_ticker": "KXBTC15M",
+                        "status": "inactive",
                         "yes_bid": 48,
                         "yes_ask": 50,
-                        "open": True,
+                        "close_time": "2026-01-01T10:15:00Z",
+                    },
+                    {
+                        "ticker": "GOOD",
+                        "series_ticker": "KXBTC15M",
+                        "status": "active",
+                        "yes_bid": 49,
+                        "yes_ask": 51,
+                        "close_time": "2026-01-01T10:15:00Z",
+                    },
+                ]
+            }
+
+    async def fake_request(method, path, **kwargs):
+        return Resp()
+
+    monkeypatch.setattr(c, "_request", fake_request)
+
+    import asyncio
+
+    m = asyncio.run(c.resolve_btc_target_market("15m", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
+    assert m is not None
+    assert m.ticker == "GOOD"
+
+
+def test_resolver_none_with_reason_when_outside_threshold(monkeypatch):
+    c = KalshiClient()
+    c.configure_resolver(btc_15m_series_ticker="KXBTC15M", btc_1h_series_ticker="KXBTC1H", max_delta_15m=10, max_delta_1h=4200)
+
+    class Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "markets": [
+                    {
+                        "ticker": "FAR",
+                        "series_ticker": "KXBTC15M",
+                        "status": "active",
+                        "yes_bid": 48,
+                        "yes_ask": 50,
                         "close_time": "2026-01-01T10:30:00Z",
                     }
                 ]
@@ -75,84 +116,40 @@ def test_15m_rollover_selects_next_interval(monkeypatch):
 
     import asyncio
 
-    market = asyncio.run(c.resolve_active_btc_market("15m", datetime(2026, 1, 1, 10, 16, tzinfo=timezone.utc)))
-    assert market is not None
-    assert market.ticker == "KXBTC15M-1030"
+    m = asyncio.run(c.resolve_btc_target_market("15m", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
+    assert m is None
+    assert "exceeded threshold" in c.last_market_resolution_reason
 
 
-def test_1h_boundary_resolution_uses_1h_series(monkeypatch):
+def test_parsing_prefers_yes_ask_and_fallback_only_when_missing():
     c = KalshiClient()
-    captured = {}
+    now = datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)
+    market_direct = c._parse_market_from_list_item(
+        {
+            "ticker": "D",
+            "status": "active",
+            "yes_bid": 48,
+            "yes_ask": 50,
+            "no_bid": 0,
+            "close_time": "2026-01-01T10:15:00Z",
+        },
+        now,
+    )
+    assert market_direct is not None
+    assert market_direct.yes_ask == 50
 
-    class Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "markets": [
-                    {
-                        "ticker": "BTC1H-1100",
-                        "series_ticker": BTC_1H_SERIES_TICKER,
-                        "yes_bid": 47,
-                        "yes_ask": 49,
-                        "open": True,
-                        "close_time": "2026-01-01T11:00:00Z",
-                    }
-                ]
-            }
-
-    async def fake_request(method, path, **kwargs):
-        captured["params"] = kwargs.get("params", {})
-        return Resp()
-
-    monkeypatch.setattr(c, "_request", fake_request)
-
-    import asyncio
-
-    market = asyncio.run(c.resolve_active_btc_market("1h", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
-    assert market is not None
-    assert market.ticker == "BTC1H-1100"
-    assert captured["params"]["series_ticker"] == BTC_1H_SERIES_TICKER
-
-
-def test_mode_exclusivity_series_query(monkeypatch):
-    c = KalshiClient()
-    calls = []
-
-    class Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"markets": []}
-
-    async def fake_request(method, path, **kwargs):
-        calls.append(kwargs.get("params", {}).get("series_ticker"))
-        return Resp()
-
-    monkeypatch.setattr(c, "_request", fake_request)
-
-    import asyncio
-
-    asyncio.run(c.resolve_active_btc_market("15m", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
-    asyncio.run(c.resolve_active_btc_market("1h", datetime(2026, 1, 1, 10, 7, tzinfo=timezone.utc)))
-    assert calls == [BTC_15M_SERIES_TICKER, BTC_1H_SERIES_TICKER]
-
-
-def test_yes_ask_prefers_direct_field_not_reciprocal():
-    c = KalshiClient()
-    quote = c._parse_quote({"yes_bid": 48, "yes_ask": 50})
-    assert quote is not None
-    yes_bid, yes_ask, _, _ = quote
-    assert yes_bid == 48
-    assert yes_ask == 50
-
-
-def test_malformed_quote_rejected():
-    c = KalshiClient()
-    assert c._parse_quote({"yes_bid": 52, "yes_ask": 50, "no_bid": 50, "no_ask": 48}) is None
-    assert c._parse_quote({"yes_bid": 50}) is None
+    market_fallback = c._parse_market_from_list_item(
+        {
+            "ticker": "F",
+            "status": "active",
+            "yes_bid": 48,
+            "no_bid": 49,
+            "close_time": "2026-01-01T10:15:00Z",
+        },
+        now,
+    )
+    assert market_fallback is not None
+    assert market_fallback.yes_ask == 51
 
 
 def test_orderbook_derives_asks_from_opposite_bid(monkeypatch):

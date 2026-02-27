@@ -4,7 +4,7 @@ import base64
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -20,13 +20,15 @@ except ModuleNotFoundError:  # pragma: no cover
     serialization = None
     padding = None
 
+from app.utils.time_utils import next_quarter_hour_utc, next_top_of_hour_utc, parse_api_datetime, seconds_until, utc_now
+
 logger = logging.getLogger("APP.KALSHI")
 
 BTC_15M_SERIES_TICKER = "KXBTC15M"
-# TODO: confirm the exact live 1h BTC series ticker in your Kalshi account and update here if needed.
-BTC_1H_SERIES_TICKER = "KXBTC1H"
-CLOSE_WINDOW_15M_SECONDS = 120
-CLOSE_WINDOW_1H_SECONDS = 300
+BTC_1H_SERIES_TICKER = ""
+DEFAULT_RESOLVER_MAX_DELTA_SECONDS_15M = 1200
+DEFAULT_RESOLVER_MAX_DELTA_SECONDS_1H = 4200
+MAX_MARKET_SCAN_ITEMS = 3000
 
 
 @dataclass
@@ -42,6 +44,7 @@ class Market:
     title: str = ""
     close_time: datetime | None = None
     series_ticker: str = ""
+    raw_status: str = ""
 
     @property
     def bid(self) -> int:
@@ -76,11 +79,22 @@ class KalshiClient:
         self.cash_balance = 0.0
         self.connection_verified = False
         self.last_error = ""
+        self.last_market_resolution_reason = ""
         self.environment = "paper"
         self.base_url = "https://demo-api.kalshi.co"
         self.api_key_id = ""
         self._private_key = None
         self._http: Any = None
+        self.btc_15m_series_ticker = BTC_15M_SERIES_TICKER
+        self.btc_1h_series_ticker = BTC_1H_SERIES_TICKER
+        self.resolver_max_delta_seconds_15m = DEFAULT_RESOLVER_MAX_DELTA_SECONDS_15M
+        self.resolver_max_delta_seconds_1h = DEFAULT_RESOLVER_MAX_DELTA_SECONDS_1H
+
+    def configure_resolver(self, *, btc_15m_series_ticker: str, btc_1h_series_ticker: str, max_delta_15m: int, max_delta_1h: int) -> None:
+        self.btc_15m_series_ticker = (btc_15m_series_ticker or BTC_15M_SERIES_TICKER).strip()
+        self.btc_1h_series_ticker = (btc_1h_series_ticker or "").strip()
+        self.resolver_max_delta_seconds_15m = int(max_delta_15m)
+        self.resolver_max_delta_seconds_1h = int(max_delta_1h)
 
     def _set_environment(self, environment: str) -> None:
         if environment == "paper":
@@ -131,58 +145,72 @@ class KalshiClient:
         headers = self._auth_headers(method, path) if auth else {}
         return await self._http.request(method, path, params=params, json=json, headers=headers)
 
-    def _extract_close_dt(self, item: dict) -> datetime | None:
-        for field in (
-            "close_time",
-            "close_date",
-            "close_datetime",
-            "expiration_time",
-            "expiration_datetime",
-            "end_date",
-            "market_close_time",
-            "settlement_time",
-        ):
-            value = item.get(field)
-            if not value:
-                continue
+    def _get_mode_series_ticker(self, mode: str) -> str:
+        if mode == "15m":
+            return self.btc_15m_series_ticker
+        if mode == "1h":
+            return self.btc_1h_series_ticker
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    def _target_close_for_mode(self, mode: str, now: datetime) -> datetime:
+        if mode == "15m":
+            return next_quarter_hour_utc(now)
+        if mode == "1h":
+            return next_top_of_hour_utc(now)
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    def _max_delta_for_mode(self, mode: str) -> int:
+        return self.resolver_max_delta_seconds_15m if mode == "15m" else self.resolver_max_delta_seconds_1h
+
+    async def _fetch_series_open_markets(self, series_ticker: str) -> list[dict]:
+        all_markets: list[dict] = []
+        cursor: str | None = None
+        while len(all_markets) < MAX_MARKET_SCAN_ITEMS:
+            params: dict[str, Any] = {"series_ticker": series_ticker, "status": "open", "limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._request("GET", f"{self.REST_PREFIX}/markets", params=params, auth=False)
+            response.raise_for_status()
+            payload = response.json()
+            markets = payload.get("markets", [])
+            if isinstance(markets, list):
+                all_markets.extend(markets)
+            cursor = payload.get("cursor")
+            if not cursor:
+                break
+        return all_markets[:MAX_MARKET_SCAN_ITEMS]
+
+    @staticmethod
+    def _to_cents(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(round(float(value) * 100))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _read_cents(item: dict, key: str) -> int | None:
+        direct = item.get(key)
+        if direct is not None:
             try:
-                close_dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            return close_dt.astimezone(timezone.utc)
+                return int(direct)
+            except (TypeError, ValueError):
+                return None
+        dollar_key = f"{key}_dollars"
+        if dollar_key in item:
+            return KalshiClient._to_cents(item.get(dollar_key))
         return None
 
-    def _series_for_mode(self, mode: str) -> str:
-        if mode == "15m":
-            return BTC_15M_SERIES_TICKER
-        if mode == "1h":
-            return BTC_1H_SERIES_TICKER
-        raise ValueError(f"Unsupported mode: {mode}")
+    def _parse_market_from_list_item(self, item: dict, now: datetime) -> Market | None:
+        close_dt = parse_api_datetime(str(item.get("close_time", "")))
+        if close_dt is None:
+            return None
 
-    def _close_window_seconds(self, mode: str) -> int:
-        return CLOSE_WINDOW_15M_SECONDS if mode == "15m" else CLOSE_WINDOW_1H_SECONDS
-
-    def _compute_target_close(self, mode: str, now: datetime) -> datetime:
-        current = now.astimezone(timezone.utc)
-        if mode == "15m":
-            minute_bucket = ((current.minute // 15) + 1) * 15
-            if minute_bucket == 60:
-                return current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            return current.replace(minute=minute_bucket, second=0, microsecond=0)
-        if mode == "1h":
-            return current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        raise ValueError(f"Unsupported mode: {mode}")
-
-    def _parse_quote(self, item: dict) -> tuple[int, int, int, int] | None:
-        yes_bid_raw = item.get("yes_bid")
-        yes_ask_raw = item.get("yes_ask")
-        no_bid_raw = item.get("no_bid")
-        no_ask_raw = item.get("no_ask")
-
-        yes_bid = int(yes_bid_raw) if yes_bid_raw is not None else None
-        yes_ask = int(yes_ask_raw) if yes_ask_raw is not None else None
-        no_bid = int(no_bid_raw) if no_bid_raw is not None else None
-        no_ask = int(no_ask_raw) if no_ask_raw is not None else None
+        yes_bid = self._read_cents(item, "yes_bid")
+        yes_ask = self._read_cents(item, "yes_ask")
+        no_bid = self._read_cents(item, "no_bid")
+        no_ask = self._read_cents(item, "no_ask")
 
         if yes_bid is None and no_ask is not None:
             yes_bid = 100 - no_ask
@@ -195,71 +223,99 @@ class KalshiClient:
 
         if yes_bid is None or yes_ask is None or no_bid is None or no_ask is None:
             return None
+        if yes_ask < yes_bid:
+            return None
         spread = yes_ask - yes_bid
-        if yes_ask < yes_bid or spread < 0 or spread > 99:
+        if spread < 0 or spread > 99:
             return None
-        return yes_bid, yes_ask, no_bid, no_ask
 
-    def _market_from_item(self, item: dict, now: datetime) -> Market | None:
-        quote = self._parse_quote(item)
-        if quote is None:
-            return None
-        close_dt = self._extract_close_dt(item)
-        if close_dt is None:
-            return None
-        yes_bid, yes_ask, no_bid, no_ask = quote
+        status = str(item.get("status", "")).lower()
         midpoint = (yes_bid + yes_ask) / 2
         return Market(
             ticker=str(item.get("ticker", "")),
-            title=str(item.get("title", "")),
             yes_bid=yes_bid,
             yes_ask=yes_ask,
             no_bid=no_bid,
             no_ask=no_ask,
             midpoint=midpoint,
-            seconds_to_expiry=max(0, int((close_dt - now).total_seconds())),
-            active=bool(item.get("open", True)),
+            seconds_to_expiry=max(0, seconds_until(close_dt, now)),
+            active=status == "active",
+            title=str(item.get("title", "")),
             close_time=close_dt,
             series_ticker=str(item.get("series_ticker", "")),
+            raw_status=status,
         )
 
-    async def resolve_active_btc_market(self, mode: str, now: datetime | None = None) -> Market | None:
-        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        target_close = self._compute_target_close(mode, now_utc)
-        series = self._series_for_mode(mode)
-        window = self._close_window_seconds(mode)
-        params = {
-            "status": "open",
-            "series_ticker": series,
-            "min_close_ts": int((target_close - timedelta(seconds=window)).timestamp()),
-            "max_close_ts": int((target_close + timedelta(seconds=window)).timestamp()),
-            "limit": 20,
-        }
-        logger.info("Resolving %s BTC market in series %s for target close %s", mode, series, target_close.isoformat())
+    def _choose_nearest_market(self, markets: list[Market], target_close: datetime, max_delta_seconds: int) -> Market | None:
+        if not markets:
+            return None
+        nearest = min(markets, key=lambda m: abs((m.close_time - target_close).total_seconds()) if m.close_time else 10**9)
+        if nearest.close_time is None:
+            return None
+        delta = abs((nearest.close_time - target_close).total_seconds())
+        if delta > max_delta_seconds:
+            self.last_market_resolution_reason = (
+                f"Closest active market {nearest.ticker} delta {int(delta)}s exceeded threshold {max_delta_seconds}s"
+            )
+            return None
+        return nearest
 
-        response = await self._request("GET", f"{self.REST_PREFIX}/markets", params=params, auth=False)
-        response.raise_for_status()
-        items = response.json().get("markets", [])
-        candidates: list[tuple[float, Market]] = []
-        for item in items:
-            if str(item.get("series_ticker", "")) != series:
-                continue
-            market = self._market_from_item(item, now_utc)
-            if market is None or not market.active:
-                continue
-            if market.close_time is None:
-                continue
-            distance = abs((market.close_time - target_close).total_seconds())
-            candidates.append((distance, market))
-
-        if not candidates:
-            logger.info("No active BTC %s market found near target close %s", mode, target_close.isoformat())
+    async def resolve_btc_target_market(self, mode: str, now: datetime | None = None) -> Market | None:
+        self.last_market_resolution_reason = ""
+        now_utc = (now or utc_now()).astimezone(timezone.utc)
+        try:
+            series_ticker = self._get_mode_series_ticker(mode)
+        except ValueError as exc:
+            self.last_market_resolution_reason = str(exc)
             return None
 
-        candidates.sort(key=lambda x: x[0])
-        resolved = candidates[0][1]
-        logger.info("Resolved market %s closing at %s", resolved.ticker, resolved.close_time.isoformat() if resolved.close_time else "unknown")
-        return resolved
+        if mode == "1h" and not series_ticker:
+            self.last_market_resolution_reason = "1h series ticker is not configured. Set global_settings.btc_1h_series_ticker."
+            return None
+
+        target_close = self._target_close_for_mode(mode, now_utc)
+        max_delta = self._max_delta_for_mode(mode)
+
+        items = await self._fetch_series_open_markets(series_ticker)
+        parsed: list[Market] = []
+        statuses: set[str] = set()
+        missing_close = 0
+        unpriced = 0
+        for item in items:
+            status = str(item.get("status", "")).lower()
+            statuses.add(status or "unknown")
+            market = self._parse_market_from_list_item(item, now_utc)
+            if market is None:
+                if parse_api_datetime(str(item.get("close_time", ""))) is None:
+                    missing_close += 1
+                else:
+                    unpriced += 1
+                continue
+            parsed.append(market)
+
+        active = [m for m in parsed if m.raw_status == "active"]
+        chosen = self._choose_nearest_market(active, target_close, max_delta)
+
+        if chosen is None:
+            base = (
+                f"Resolver miss mode={mode} series={series_ticker} target={target_close.isoformat()} "
+                f"returned={len(items)} parsed={len(parsed)} active={len(active)} "
+                f"statuses={sorted(statuses)} missing_close={missing_close} unpriced={unpriced}"
+            )
+            if self.last_market_resolution_reason:
+                self.last_market_resolution_reason = f"{base}; {self.last_market_resolution_reason}"
+            else:
+                self.last_market_resolution_reason = f"{base}; no active market near target"
+            return None
+
+        self.last_market_resolution_reason = (
+            f"Resolved mode={mode} series={series_ticker} ticker={chosen.ticker} close={chosen.close_time.isoformat()} "
+            f"seconds_to_expiry={chosen.seconds_to_expiry} bid={chosen.yes_bid} ask={chosen.yes_ask} mid={chosen.midpoint:.1f}"
+        )
+        return chosen
+
+    async def resolve_active_btc_market(self, mode: str, now: datetime | None = None) -> Market | None:
+        return await self.resolve_btc_target_market(mode, now)
 
     async def connect(self, api_key: str, api_secret: str, environment: str) -> bool:
         self.last_error = ""
@@ -365,8 +421,7 @@ class KalshiClient:
         }
 
     async def list_btc_markets(self, mode: str) -> list[Market]:
-        resolved = await self.resolve_active_btc_market(mode)
+        resolved = await self.resolve_btc_target_market(mode)
         if resolved is None:
-            logger.info("No active BTC %s market resolved", mode)
             return []
         return [resolved]

@@ -15,7 +15,7 @@ from app.brokers.kalshi_client import KalshiClient, Market
 from app.config.settings import AppSettings
 from app.core.state_manager import StateManager
 from app.feeds.btc_reference_feed import BTCReferenceFeed
-from app.strategy.contract_selector import rank_markets
+from app.strategy.contract_selector import validate_market
 from app.strategy.risk_rules import RiskEngine, RiskSnapshot
 from app.strategy.signal_engine import generate_signal
 from app.utils.constants import AppState
@@ -47,11 +47,21 @@ class AppController:
             logger.info("Invalidating cached market %s due to %s", self._resolved_market.ticker, reason)
         self._resolved_market = None
 
+    def _configure_market_resolver(self) -> None:
+        gs = self.settings.global_settings
+        self.kalshi.configure_resolver(
+            btc_15m_series_ticker=gs.btc_15m_series_ticker,
+            btc_1h_series_ticker=gs.btc_1h_series_ticker,
+            max_delta_15m=gs.resolver_max_delta_seconds_15m,
+            max_delta_1h=gs.resolver_max_delta_seconds_1h,
+        )
+
     async def start(self, api_key: str, api_secret: str, broker_mode: str, strategy_mode: str) -> None:
         if self._running:
             return
         self.state.transition(AppState.STARTING)
         self.emit("state", {"state": self.state.state})
+        self._configure_market_resolver()
 
         ok = await self.kalshi.connect(api_key, api_secret, environment=broker_mode)
         if not ok:
@@ -128,11 +138,12 @@ class AppController:
     async def _resolve_market(self, strategy_mode: str) -> Market | None:
         if self._should_reresolve_market(strategy_mode):
             previous = self._resolved_market.ticker if self._resolved_market else "none"
-            self._resolved_market = await self.kalshi.resolve_active_btc_market(strategy_mode)
+            self._resolved_market = await self.kalshi.resolve_btc_target_market(strategy_mode)
             self.polling_counts["market"] += 1
             self._active_strategy_mode = strategy_mode
             if self._resolved_market:
                 logger.info("Resolved market switched from %s to %s", previous, self._resolved_market.ticker)
+                self.emit("status_reason", {"message": self.kalshi.last_market_resolution_reason})
         return self._resolved_market
 
     async def _loop(self, strategy_mode: str, broker_mode: str) -> None:
@@ -163,35 +174,33 @@ class AppController:
                     self.emit("status_reason", {"message": f"Kalshi request error: {exc}"})
                     await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                     continue
-                raise
-
-            if market is None:
-                self.emit("status_reason", {"message": f"No active BTC {strategy_mode} market found near target close"})
+                self.emit("status_reason", {"message": f"Resolver error: {exc}"})
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 
-            ranked = rank_markets(
-                [market],
+            if market is None:
+                self.emit(
+                    "status_reason",
+                    {"message": self.kalshi.last_market_resolution_reason or f"No active BTC {strategy_mode} target market"},
+                )
+                await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
+                continue
+
+            ok_market, reason = validate_market(
+                market,
                 mode_cfg.spread_filter_cents,
                 mode_cfg.min_price_cents,
                 mode_cfg.max_price_cents,
                 mode_cfg.no_entry_before_expiry_seconds,
-                mode_cfg.preferred_mid_low,
-                mode_cfg.preferred_mid_high,
             )
-            if not ranked:
-                reason = (
-                    f"Skipping resolved market {market.ticker}: "
-                    f"spread {market.yes_ask - market.yes_bid}, midpoint {market.midpoint:.1f}, "
-                    f"seconds_to_expiry {market.seconds_to_expiry}"
-                )
-                self.emit("status_reason", {"message": reason})
-                if market.seconds_to_expiry <= mode_cfg.no_entry_before_expiry_seconds:
+            if not ok_market:
+                self.emit("status_reason", {"message": f"Resolved market skipped: {reason}"})
+                if "expiry" in reason:
                     self.invalidate_market_cache("near expiry rollover")
                 await asyncio.sleep(self.settings.global_settings.scan_interval_seconds)
                 continue
 
-            chosen = ranked[0]
+            chosen = market
             try:
                 book = await self.kalshi.get_orderbook_snapshot(chosen.ticker)
                 self.polling_counts["orderbook"] += 1

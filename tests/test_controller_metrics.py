@@ -51,7 +51,7 @@ def test_controller_emits_session_and_polling_metrics(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
     monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
@@ -112,7 +112,7 @@ def test_controller_skips_new_entry_when_open_orders_exist(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
     monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
@@ -169,7 +169,7 @@ def test_controller_uses_no_ask_limit_for_buy_no(monkeypatch):
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_orderbook_snapshot", fake_orderbook)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
     monkeypatch.setattr(controller.kalshi, "place_limit_order", fake_place_limit_order)
@@ -260,7 +260,7 @@ def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypat
     monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
     monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
     monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
-    monkeypatch.setattr(controller.kalshi, "resolve_active_btc_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
     monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
 
     async def run():
@@ -271,7 +271,7 @@ def test_controller_emits_bid_ask_preview_when_all_candidates_filtered(monkeypat
     asyncio.run(run())
 
     reasons = [payload for kind, payload in events if kind == "status_reason"]
-    assert any("skipping resolved market" in r["message"].lower() for r in reasons)
+    assert any("resolved market skipped" in r["message"].lower() for r in reasons)
 
 
 
@@ -288,3 +288,134 @@ def test_controller_mode_change_invalidates_cached_market():
     controller.invalidate_market_cache("mode changed to 1h")
 
     assert controller._resolved_market is None
+
+
+
+def test_controller_emits_resolver_specific_status_when_unresolved(monkeypatch):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    controller = AppController(settings, emit)
+
+    async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary() -> dict:
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=1, momentum_15s=1, momentum_60s=1, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        controller.kalshi.last_market_resolution_reason = "Resolver miss mode=15m series=KXBTC15M target=..."
+        return None
+
+    async def fake_open_orders():
+        return []
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "15m")
+        await asyncio.sleep(0.4)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    reasons = [payload["message"] for kind, payload in events if kind == "status_reason"]
+    assert any("resolver miss" in msg.lower() for msg in reasons)
+
+
+def test_controller_validation_reason_for_near_expiry(monkeypatch):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    controller = AppController(settings, emit)
+
+    async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary() -> dict:
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=1, momentum_15s=1, momentum_60s=1, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_resolve(mode: str, now=None):
+        return Market(ticker="EXP", yes_bid=49, yes_ask=50, no_bid=50, no_ask=51, midpoint=49.5, seconds_to_expiry=1)
+
+    async def fake_open_orders():
+        return []
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "resolve_btc_target_market", fake_resolve)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "15m")
+        await asyncio.sleep(0.4)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    reasons = [payload["message"] for kind, payload in events if kind == "status_reason"]
+    assert any("resolved market skipped" in msg.lower() and "expiry" in msg.lower() for msg in reasons)
+
+
+def test_controller_1h_blank_series_reports_configuration_error(monkeypatch):
+    events = []
+
+    def emit(kind: str, payload: dict):
+        events.append((kind, payload))
+
+    settings = AppSettings()
+    settings.global_settings.scan_interval_seconds = 0.2
+    settings.global_settings.btc_1h_series_ticker = ""
+    controller = AppController(settings, emit)
+
+    async def fake_connect(api_key: str, api_secret: str, environment: str) -> bool:
+        controller.kalshi.connected = True
+        controller.kalshi.connection_verified = True
+        return True
+
+    async def fake_summary() -> dict:
+        return {"cash_balance": 1.0, "connected": True, "account": "A", "verified": True, "environment": "paper"}
+
+    async def fake_tick():
+        return FeedTick(spot=65000, momentum_5s=1, momentum_15s=1, momentum_60s=1, volatility=1, updated_at=1, is_stale=False)
+
+    async def fake_open_orders():
+        return []
+
+    monkeypatch.setattr(controller.kalshi, "connect", fake_connect)
+    monkeypatch.setattr(controller.kalshi, "get_account_summary", fake_summary)
+    monkeypatch.setattr(controller.feed, "get_tick", fake_tick)
+    monkeypatch.setattr(controller.kalshi, "get_open_orders", fake_open_orders)
+
+    async def run():
+        await controller.start("ABCD1234", "secret", "paper", "1h")
+        await asyncio.sleep(0.4)
+        await controller.stop()
+
+    asyncio.run(run())
+
+    reasons = [payload["message"] for kind, payload in events if kind == "status_reason"]
+    assert any("1h series ticker is not configured" in msg.lower() for msg in reasons)

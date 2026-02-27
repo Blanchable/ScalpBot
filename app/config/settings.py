@@ -40,6 +40,10 @@ class GlobalSettings:
     max_notional_exposure: float = 100.0
     feed_stale_seconds: int = 5
     scan_interval_seconds: float = 1.0
+    btc_15m_series_ticker: str = "KXBTC15M"
+    btc_1h_series_ticker: str = ""
+    resolver_max_delta_seconds_15m: int = 1200
+    resolver_max_delta_seconds_1h: int = 4200
 
 
 @dataclass

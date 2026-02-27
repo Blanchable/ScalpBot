@@ -13,7 +13,12 @@
     "max_consecutive_losses": 3,
     "max_position_size": 1,
     "max_notional_exposure": 100.0,
-    "feed_stale_seconds": 5
+    "feed_stale_seconds": 5,
+    "scan_interval_seconds": 1.0,
+    "btc_15m_series_ticker": "KXBTC15M",
+    "btc_1h_series_ticker": "",
+    "resolver_max_delta_seconds_15m": 1200,
+    "resolver_max_delta_seconds_1h": 4200
   },
   "mode_settings": {
     "15m": {
