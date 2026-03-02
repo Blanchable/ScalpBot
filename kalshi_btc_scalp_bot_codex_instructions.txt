@@ -1,0 +1,13 @@
+KALSHI BTC SCALP BOT - CODEX BUILD INSTRUCTION FILE
+
+This repository now contains a runnable scaffold that implements the requested Windows-first architecture:
+- Dual strategy mode support (15m / 1h)
+- One-click setup and launch batch script
+- PySide6 desktop GUI control center
+- Async trading controller loop with state machine
+- Paper broker and live/paper mode plumbing
+- SQLite persistence bootstrap
+- Logging, risk checks, and market/signal filtering modules
+- Environment verification and pytest coverage
+
+Refer to README.md for launch and extension details.
