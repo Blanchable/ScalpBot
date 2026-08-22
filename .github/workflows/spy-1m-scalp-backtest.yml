@@ -1,0 +1,72 @@
+name: SPY 1m Scalp Backtest
+
+on:
+  push:
+    branches:
+      - backtest/spy-1m-scalp-2026-08-22
+    paths:
+      - "research/spy_1m_scalp_backtest.py"
+      - ".github/workflows/spy-1m-scalp-backtest.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "research/spy_1m_scalp_backtest.py"
+      - ".github/workflows/spy-1m-scalp-backtest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check pandas numpy matplotlib requests
+
+      - name: Verify runner syntax and hash
+        run: |
+          python -m py_compile research/spy_1m_scalp_backtest.py
+          sha256sum research/spy_1m_scalp_backtest.py | tee runner_sha256.txt
+
+      - name: Run backtest
+        env:
+          BACKTEST_OUT: results
+        run: python research/spy_1m_scalp_backtest.py | tee run_output.json
+
+      - name: Show headline result
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('results/summary.json')
+          if p.exists():
+              d = json.loads(p.read_text())
+              print(json.dumps({'verdict': d['verdict'], 'data_quality': d['data_quality'], 'primary': d['primary']}, indent=2))
+          else:
+              print('summary.json was not created')
+          PY
+
+      - name: Upload verified results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spy-1m-scalp-backtest-results
+          path: |
+            results/**
+            run_output.json
+            runner_sha256.txt
+            research/spy_1m_scalp_backtest.py
+          if-no-files-found: warn
+          retention-days: 30
