@@ -1,0 +1,37 @@
+ype(float)
+    pos = r[r > 0].sum(); neg = -r[r < 0].sum()
+    rng = np.random.default_rng(seed)
+    boots = np.array([rng.choice(r.to_numpy(), size=len(r), replace=True).mean() for _ in range(20000)])
+    split = max(1, int(len(trades) * 0.60))
+    return {
+        "sessions": int(sessions), "trades": int(len(trades)),
+        "trades_per_5_session_week": float(len(trades) / sessions * 5),
+        "trades_per_21_session_month": float(len(trades) / sessions * 21),
+        "win_rate": float((r > 0).mean()), "average_r": float(r.mean()), "median_r": float(r.median()),
+        "total_r": float(r.sum()), "profit_factor": float(pos / neg) if neg > 0 else None,
+        "average_winner_r": float(r[r > 0].mean()) if (r > 0).any() else None,
+        "average_loser_r": float(r[r < 0].mean()) if (r < 0).any() else None,
+        "max_drawdown_r": float(trades["drawdown_r"].min()),
+        "max_consecutive_losses": int(longest_streak(r < 0)),
+        "bootstrap_mean_r_95pct": [float(np.quantile(boots, 0.025)), float(np.quantile(boots, 0.975))],
+        "first_60pct_average_r": float(r.iloc[:split].mean()), "last_40pct_average_r": float(r.iloc[split:].mean()) if split < len(r) else None,
+    }
+
+
+def grouped(trades: pd.DataFrame, key: str) -> list[dict]:
+    if trades.empty:
+        return []
+    out = []
+    for value, g in trades.groupby(key, dropna=False):
+        s = stats(g.reset_index(drop=True).assign(cumulative_r=g["r_multiple"].cumsum(), peak_r=g["r_multiple"].cumsum().cummax().clip(lower=0), drawdown_r=lambda x: x["cumulative_r"]-x["peak_r"]), sessions=1)
+        out.append({key: str(value), "trades": s["trades"], "win_rate": s.get("win_rate"), "average_r": s.get("average_r"), "profit_factor": s.get("profit_factor"), "total_r": s.get("total_r")})
+    return out
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    data, quality, session_quality = load_data()
+    session_quality.to_csv(OUT / "session_quality.csv", index=False)
+    configs = {
+        "fixed_1.25": Config(),
+        "breakeven_1R_1.25": C

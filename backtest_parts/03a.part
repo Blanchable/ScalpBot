@@ -1,0 +1,29 @@
+ldown_bars; pos = None; pending = None
+                else:
+                    if cfg.breakeven_after_r is not None and not pos["breakeven_armed"] and not pos["breakeven_pending"]:
+                        one_r = pos["entry"] + cfg.breakeven_after_r * pos["risk"] if pos["side"] == "CALL" else pos["entry"] - cfg.breakeven_after_r * pos["risk"]
+                        touched = bar["High"] >= one_r if pos["side"] == "CALL" else bar["Low"] <= one_r
+                        if touched:
+                            pos["breakeven_pending"] = True
+                    if pos["side"] == "CALL" and bar["Close"] < bar["ema"]:
+                        pos["ema_exit_pending"] = True
+                    elif pos["side"] == "PUT" and bar["Close"] > bar["ema"]:
+                        pos["ema_exit_pending"] = True
+
+            # Fill a pending order only in the two bars after confirmation.
+            if pos is None and pending is not None:
+                if i > pending["expires_i"] or not allowed(bar["timestamp"]):
+                    signals.append({**pending, "date": str(d), "status": "EXPIRED_UNFILLED"})
+                    pending = None
+                elif i > pending["confirmation_i"]:
+                    fill = fill_order(pending, bar)
+                    if fill:
+                        entry, gap = fill
+                        risk = entry - pending["stop"] if pending["side"] == "CALL" else pending["stop"] - entry
+                        risk_pct = risk / entry
+                        if cfg.min_risk_pct <= risk_pct <= cfg.max_risk_pct:
+                            target = entry + cfg.target_r * risk if pending["side"] == "CALL" else entry - cfg.target_r * risk
+                            pos = {
+                                "side": pending["side"], "signal_time": pending["signal_time"], "entry_time": bar["timestamp"],
+                                "entry": float(entry), "stop": float(pending["stop"]), "original_stop": float(pending["stop"]),
+                                "target": float(target), "risk": floa

@@ -1,0 +1,97 @@
+, quality, sessions
+
+
+def indicators(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    x = frame.copy()
+    if cfg.ema_reset_each_session:
+        x["ema"] = x.groupby("date", sort=False)["Close"].transform(
+            lambda s: s.ewm(span=cfg.ema_period, adjust=False, min_periods=cfg.ema_period).mean()
+        )
+    else:
+        x["ema"] = x["Close"].ewm(span=cfg.ema_period, adjust=False, min_periods=cfg.ema_period).mean()
+    x["ema_lag"] = x.groupby("date", sort=False)["ema"].shift(cfg.ema_slope_lookback)
+    x["ema_slope_pct"] = x["ema"] / x["ema_lag"] - 1
+    x["prior_vol_avg"] = x.groupby("date", sort=False)["Volume"].transform(
+        lambda s: s.shift(1).rolling(cfg.volume_lookback, min_periods=cfg.volume_lookback).mean()
+    )
+    x["volume_ratio"] = x["Volume"] / x["prior_vol_avg"]
+    rng = x["High"] - x["Low"]
+    x["close_location"] = np.where(rng > 0, (x["Close"] - x["Low"]) / rng, 0.5)
+    return x
+
+
+def candidate(day: pd.DataFrame, i: int, pb_len: int, side: str, cfg: Config) -> Optional[dict]:
+    if i < pb_len + 1:
+        return None
+    c = day.iloc[i]
+    prev = day.iloc[i - 1]
+    pre = day.iloc[i - pb_len - 1]
+    pb = day.iloc[i - pb_len:i]
+    if not allowed(c["timestamp"]):
+        return None
+    if any(pd.isna(v) for v in [c["ema"], c["ema_lag"], c["volume_ratio"]]):
+        return None
+    if c["volume_ratio"] < cfg.volume_multiplier:
+        return None
+
+    if side == "CALL":
+        trend = c["Close"] > c["ema"] and c["ema"] > c["ema_lag"] and pre["Close"] > pre["ema"]
+        shape = pb.iloc[-1]["Close"] < pre["Close"] and bool((pb["Close"] < pb["Open"]).any())
+        approach = bool((pb["Low"] <= pb["ema"] * (1 + cfg.ema_approach_pct)).any())
+        held = bool((pb["Close"] >= pb["ema"] * (1 - cfg.material_close_tolerance_pct)).all())
+        confirm = c["Close"] > prev["High"] and c["close_location"] >= 2 / 3
+        trigger = float(c["High"] + cfg.entry_buffer)
+        stop = float(pb["Low"].min() - cfg.stop_buffer)
+        risk = trigger - stop
+        target = trigger + cfg.target_r * risk
+    else:
+        trend = c["Close"] < c["ema"] and c["ema"] < c["ema_lag"] and pre["Close"] < pre["ema"]
+        shape = pb.iloc[-1]["Close"] > pre["Close"] and bool((pb["Close"] > pb["Open"]).any())
+        approach = bool((pb["High"] >= pb["ema"] * (1 - cfg.ema_approach_pct)).any())
+        held = bool((pb["Close"] <= pb["ema"] * (1 + cfg.material_close_tolerance_pct)).all())
+        confirm = c["Close"] < prev["Low"] and c["close_location"] <= 1 / 3
+        trigger = float(c["Low"] - cfg.entry_buffer)
+        stop = float(pb["High"].max() + cfg.stop_buffer)
+        risk = stop - trigger
+        target = trigger - cfg.target_r * risk
+
+    risk_pct = risk / trigger if trigger > 0 else math.inf
+    if not (trend and shape and approach and held and confirm):
+        return None
+    if not cfg.min_risk_pct <= risk_pct <= cfg.max_risk_pct:
+        return None
+    return {
+        "side": side,
+        "confirmation_i": i,
+        "signal_time": c["timestamp"],
+        "expires_i": i + cfg.pending_bars,
+        "trigger": trigger,
+        "stop": stop,
+        "target": target,
+        "risk": float(risk),
+        "pullback_length": pb_len,
+        "volume_ratio": float(c["volume_ratio"]),
+        "ema": float(c["ema"]),
+        "ema_slope_pct": float(c["ema_slope_pct"]),
+        "segment": segment(c["timestamp"]),
+    }
+
+
+def find_setup(day: pd.DataFrame, i: int, cfg: Config) -> Optional[dict]:
+    found = []
+    for side in ("CALL", "PUT"):
+        for pb_len in (1, 2, 3):
+            c = candidate(day, i, pb_len, side, cfg)
+            if c:
+                found.append(c)
+    if not found:
+        return None
+    found.sort(key=lambda c: (c["pullback_length"], c["side"] == "CALL"), reverse=True)
+    return found[0]
+
+
+def fill_order(order: dict, bar: pd.Series) -> Optional[tuple[float, float]]:
+    if order["side"] == "CALL":
+        if bar["Open"] >= order["trigger"]:
+            return float(bar["Open"]), float(bar["Open"] - order["trigger"])
+        if bar["High"] >= order["trigger"]:

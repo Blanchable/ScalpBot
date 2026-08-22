@@ -1,0 +1,8 @@
+sk, delta, expiration, and implied-volatility data.",
+    ]
+    (OUT / "SUMMARY.md").write_text("\n".join(lines), encoding="utf-8")
+    print(json.dumps(payload, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    main()
