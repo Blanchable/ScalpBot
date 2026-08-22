@@ -7,6 +7,12 @@ on:
     paths:
       - ".github/workflows/spy-ema-volume-backtest.yml"
       - "backtest_parts/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/spy-ema-volume-backtest.yml"
+      - "backtest_parts/**"
   workflow_dispatch:
 
 permissions:
