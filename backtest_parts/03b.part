@@ -1,0 +1,27 @@
+t(risk), "pullback_length": pending["pullback_length"],
+                                "volume_ratio": pending["volume_ratio"], "ema_slope_pct": pending["ema_slope_pct"],
+                                "segment": pending["segment"], "gap_slippage": float(gap), "breakeven_armed": False,
+                                "breakeven_pending": False, "ema_exit_pending": False,
+                            }
+                            signals.append({**pending, "date": str(d), "status": "FILLED", "actual_entry": entry, "actual_risk": risk})
+
+                            # The entry candle can hit stop and target. Use stop-first.
+                            t = None
+                            if pos["side"] == "CALL":
+                                if bar["Low"] <= pos["stop"]:
+                                    t = close_trade(pos, bar, pos["stop"], "ENTRY_BAR_STOP")
+                                elif bar["High"] >= pos["target"]:
+                                    t = close_trade(pos, bar, pos["target"], "ENTRY_BAR_TARGET")
+                            else:
+                                if bar["High"] >= pos["stop"]:
+                                    t = close_trade(pos, bar, pos["stop"], "ENTRY_BAR_STOP")
+                                elif bar["Low"] <= pos["target"]:
+                                    t = close_trade(pos, bar, pos["target"], "ENTRY_BAR_TARGET")
+                            if t is not None:
+                                trades.append(t); completed += 1; losses += int(t["r_multiple"] < 0)
+                                cooldown_until = i + cfg.cooldown_bars; pos = None
+                            elif pos is not None:
+                                if cfg.breakeven_after_r is not None:
+                                    one_r = pos["entry"] + cfg.breakeven_after_r * pos["risk"] if pos["side"] == "CALL" else pos["entry"] - cfg.breakeven_after_r * pos["risk"]
+                                    touched = bar["High"] >= one_r if pos["side"] == "CALL" else bar["Low"] <= one_r
+           

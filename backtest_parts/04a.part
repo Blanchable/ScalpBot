@@ -1,0 +1,47 @@
+                         pos["breakeven_pending"] = bool(touched)
+                                if pos["side"] == "CALL" and bar["Close"] < bar["ema"]:
+                                    pos["ema_exit_pending"] = True
+                                elif pos["side"] == "PUT" and bar["Close"] > bar["ema"]:
+                                    pos["ema_exit_pending"] = True
+                        else:
+                            signals.append({**pending, "date": str(d), "status": "REJECTED_GAP_RISK", "actual_entry": entry, "actual_risk": risk})
+                        pending = None
+
+            can_signal = (
+                pos is None and pending is None and i >= cooldown_until
+                and completed < cfg.max_entries_per_day and losses < cfg.max_losses_per_day
+                and bar["clock"] < time(15, 0)
+            )
+            if can_signal:
+                pending = find_setup(day, i, cfg)
+
+        if pos is not None:
+            last = day.iloc[-1]
+            trades.append(close_trade(pos, last, float(last["Close"]), "SESSION_END_DEFENSIVE"))
+
+    tdf = pd.DataFrame(trades)
+    sdf = pd.DataFrame(signals)
+    if not tdf.empty:
+        tdf["entry_time"] = pd.to_datetime(tdf["entry_time"], utc=True).dt.tz_convert("America/New_York")
+        tdf["exit_time"] = pd.to_datetime(tdf["exit_time"], utc=True).dt.tz_convert("America/New_York")
+        tdf = tdf.sort_values("entry_time").reset_index(drop=True)
+        tdf["cumulative_r"] = tdf["r_multiple"].cumsum()
+        tdf["peak_r"] = tdf["cumulative_r"].cummax().clip(lower=0)
+        tdf["drawdown_r"] = tdf["cumulative_r"] - tdf["peak_r"]
+    return tdf, sdf
+
+
+def longest_streak(values: pd.Series) -> int:
+    best = current = 0
+    for v in values:
+        if v:
+            current += 1; best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def stats(trades: pd.DataFrame, sessions: int, seed: int = 20260822) -> dict:
+    if trades.empty:
+        return {"sessions": sessions, "trades": 0}
+    r = trades["r_multiple"].ast

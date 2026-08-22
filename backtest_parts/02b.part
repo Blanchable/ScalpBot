@@ -1,0 +1,34 @@
+] >= time(15, 50):
+                    t = close_trade(pos, bar, float(bar["Open"]), "TIME_1550")
+                    trades.append(t); completed += 1; losses += int(t["r_multiple"] < 0)
+                    cooldown_until = i + cfg.cooldown_bars; pos = None; pending = None
+                elif pos["ema_exit_pending"]:
+                    t = close_trade(pos, bar, float(bar["Open"]), "EMA_CLOSE_NEXT_OPEN")
+                    trades.append(t); completed += 1; losses += int(t["r_multiple"] < 0)
+                    cooldown_until = i + cfg.cooldown_bars; pos = None; pending = None
+
+            # Manage an existing position. Stop-first is the conservative OHLC convention.
+            if pos is not None:
+                t = None
+                if pos["side"] == "CALL":
+                    if bar["Open"] <= pos["stop"]:
+                        t = close_trade(pos, bar, float(bar["Open"]), "STOP_GAP")
+                    elif bar["Low"] <= pos["stop"]:
+                        t = close_trade(pos, bar, float(pos["stop"]), "STOP")
+                    elif bar["Open"] >= pos["target"]:
+                        t = close_trade(pos, bar, float(bar["Open"]), "TARGET_GAP")
+                    elif bar["High"] >= pos["target"]:
+                        t = close_trade(pos, bar, float(pos["target"]), "TARGET")
+                else:
+                    if bar["Open"] >= pos["stop"]:
+                        t = close_trade(pos, bar, float(bar["Open"]), "STOP_GAP")
+                    elif bar["High"] >= pos["stop"]:
+                        t = close_trade(pos, bar, float(pos["stop"]), "STOP")
+                    elif bar["Open"] <= pos["target"]:
+                        t = close_trade(pos, bar, float(bar["Open"]), "TARGET_GAP")
+                    elif bar["Low"] <= pos["target"]:
+                        t = close_trade(pos, bar, float(pos["target"]), "TARGET")
+
+                if t is not None:
+                    trades.append(t); completed += 1; losses += int(t["r_multiple"] < 0)
+                    cooldown_until = i + cfg.coo

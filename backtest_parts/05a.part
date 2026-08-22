@@ -1,0 +1,42 @@
+onfig(breakeven_after_r=1.0),
+    }
+    summaries = {}
+    primary_trades = None
+    primary_signals = None
+    for name, cfg in configs.items():
+        trades, signals = run_backtest(data, cfg)
+        trades.to_csv(OUT / f"trades_{name}.csv", index=False)
+        signals.to_csv(OUT / f"signals_{name}.csv", index=False)
+        summaries[name] = stats(trades, quality["complete_sessions"])
+        summaries[name]["config"] = asdict(cfg)
+        summaries[name]["by_side"] = grouped(trades, "side")
+        summaries[name]["by_segment"] = grouped(trades, "segment")
+        summaries[name]["by_exit_reason"] = grouped(trades, "exit_reason")
+        if name == "fixed_1.25":
+            primary_trades, primary_signals = trades, signals
+
+    sensitivity_rows = []
+    for mult in [1.00, 1.10, 1.25, 1.40, 1.50]:
+        for reset in [False, True]:
+            cfg = Config(volume_multiplier=mult, ema_reset_each_session=reset)
+            trades, _ = run_backtest(data, cfg)
+            s = stats(trades, quality["complete_sessions"])
+            sensitivity_rows.append({"volume_multiplier": mult, "ema_reset_each_session": reset, **{k: s.get(k) for k in ["trades", "trades_per_5_session_week", "win_rate", "average_r", "profit_factor", "total_r", "max_drawdown_r"]}})
+    sensitivity = pd.DataFrame(sensitivity_rows)
+    sensitivity.to_csv(OUT / "sensitivity.csv", index=False)
+
+    fixed = summaries["fixed_1.25"]
+    be = summaries["breakeven_1R_1.25"]
+    ci = fixed.get("bootstrap_mean_r_95pct", [None, None])
+    enough = fixed.get("trades", 0) >= 100
+    positive = fixed.get("average_r", -999) > 0 and (fixed.get("profit_factor") or 0) > 1
+    robust = ci[0] is not None and ci[0] > 0 and fixed.get("last_40pct_average_r", -999) > 0
+    if enough and positive and robust:
+        verdict = "PROMISING_UNDERLYING_SIGNAL__PROCEED_TO_OPTIONS_BACKTEST"
+    elif positive:
+        verdict = "POSITIVE_BUT_NOT_VALIDATED__DO_NOT_TRADE_LIVE"
+    else:
+        verdict = "FAILED_PRELIMINARY_TEST__REVISE_OR_REJECT"
+
+    payload = {
+        "verd

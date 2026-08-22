@@ -1,0 +1,55 @@
+            return float(order["trigger"]), 0.0
+    else:
+        if bar["Open"] <= order["trigger"]:
+            return float(bar["Open"]), float(order["trigger"] - bar["Open"])
+        if bar["Low"] <= order["trigger"]:
+            return float(order["trigger"]), 0.0
+    return None
+
+
+def close_trade(pos: dict, bar: pd.Series, price: float, reason: str) -> dict:
+    pnl = price - pos["entry"] if pos["side"] == "CALL" else pos["entry"] - price
+    r = pnl / pos["risk"]
+    return {
+        "date": str(pos["entry_time"].date()),
+        "side": pos["side"],
+        "signal_time": pos["signal_time"].isoformat(),
+        "entry_time": pos["entry_time"].isoformat(),
+        "exit_time": bar["timestamp"].isoformat(),
+        "segment": pos["segment"],
+        "entry": pos["entry"],
+        "original_stop": pos["original_stop"],
+        "final_stop": pos["stop"],
+        "target": pos["target"],
+        "exit": float(price),
+        "risk_points": pos["risk"],
+        "pnl_points": float(pnl),
+        "r_multiple": float(r),
+        "exit_reason": reason,
+        "pullback_length": pos["pullback_length"],
+        "volume_ratio": pos["volume_ratio"],
+        "ema_slope_pct": pos["ema_slope_pct"],
+        "gap_slippage_points": pos["gap_slippage"],
+        "breakeven_armed": bool(pos["breakeven_armed"]),
+    }
+
+
+def run_backtest(frame: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    data = indicators(frame, cfg)
+    trades, signals = [], []
+
+    for d, group in data.groupby("date", sort=True):
+        day = group.reset_index(drop=True)
+        pending = None
+        pos = None
+        completed = losses = 0
+        cooldown_until = -1
+
+        for i, bar in day.iterrows():
+            # Apply next-bar protective actions before the new bar trades.
+            if pos is not None:
+                if pos["breakeven_pending"]:
+                    pos["stop"] = pos["entry"]
+                    pos["breakeven_armed"] = True
+                    pos["breakeven_pending"] = False
+                if bar["clock"
